@@ -15,7 +15,7 @@ out vec2 vC; out float vDz2; out float vAer; out float vFl;
 void main() {
   // particles lying on the floor are splatted as flattened (pancake) kernels -> thin continuous film
   float fl = aP.w >= 2.0 ? 1.0 : 0.0;
-  float hx = uH * (1.0 + 1.0 * fl);
+  float hx = uH * (1.0 + 1.6 * fl);
   float dz = aP.z - uSliceZ, k = 1.0 - dz * dz / (hx * hx);
   if (k <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
   vec2 c = (aP.xy - uVolMin.xy) / uCell;
@@ -30,7 +30,7 @@ uniform float uCell, uH;
 out vec4 o;
 void main() {
   vec2 d = (gl_FragCoord.xy - vC) * uCell;
-  float hx = uH * (1.0 + 1.0 * vFl), hy = uH * (1.0 - 0.55 * vFl);
+  float hx = uH * (1.0 + 1.6 * vFl), hy = uH * (1.0 - 0.6 * vFl);   // floor water: wide, flat kernels (smooth film)
   float q = 1.0 - (d.x * d.x + vDz2) / (hx * hx) - d.y * d.y / (hy * hy);
   if (q <= 0.0) discard;
   float w = q * q * q;
@@ -109,6 +109,15 @@ vec3 nEll(vec3 p, float rL, float rP) {
   vec3 x = p - vCen; float s = dot(x, vAx);
   return normalize((x - vAx * s) / (rP * rP) + vAx * s / (rL * rL));
 }
+// what a drop shows through itself: the lit red latex if the ray meets the still-covered balloon, else the studio
+vec3 dropBack(vec3 p, vec3 d) {
+  vec3 oc = p - uC; float b = dot(oc, d), c = dot(oc, oc) - uR * uR * 1.1, disc = b * b - c;
+  if (uMembrane == 1 && disc > 0.0 && -b - sqrt(disc) > 0.0) {
+    vec3 q = p + d * (-b - sqrt(disc)), nq = normalize(q - uC);
+    if (peelT(nq) > uTime) return uRubberCol * ((uL0e * rectIrr(q, nq, uL0c, uL0u, uL0v) + uL1e * rectIrr(q, nq, uL1c, uL1u, uL1v)) / PI * 0.85 + ambientTerm(nq));
+  }
+  return envCheap(p + d * 1e-4, d, true);
+}
 void main() {
   float rL = vRad * pow(vEl, 0.6667), rP = vRad * pow(vEl, -0.3333);
   vec3 rd = normalize(vW - uCamPos);
@@ -124,7 +133,7 @@ void main() {
   vec3 d2 = refract(d1, -n2, 1.333);
   if (dot(d2, d2) < 0.5) d2 = reflect(d1, -n2);
   float F2 = fresnelDiel(max(dot(d1, n2), 1e-3), 1.0 / 1.333);
-  vec3 cT = envCheap(p2 + d2 * 1e-4, d2, true) * (1.0 - F2);
+  vec3 cT = dropBack(p2, d2) * (1.0 - F2);
   vec3 col = F * cR + (1.0 - F) * cT;
   // slightly broadened specular glints of the two softboxes (drops are never perfectly spherical)
   col += rectSpec(p, n, -rd, 0.08, vec3(0.02), uL0c, uL0u, uL0v, uL0e) + rectSpec(p, n, -rd, 0.08, vec3(0.02), uL1c, uL1u, uL1v, uL1e);
@@ -138,7 +147,7 @@ void main() {
     float c0 = dot(normalize(d0), rd), c1 = dot(normalize(d1), rd);
     g += uL0e * o0 * (0.012 + 0.6 * exp(-(1.0 - c0) * 9.0));
     g += uL1e * o1 * (0.012 + 0.6 * exp(-(1.0 - c1) * 9.0));
-    col = g + 0.75 * envCheap(vCen + rd * vRad * 2.0, rd, true);
+    col = g + 0.75 * dropBack(vCen + rd * vRad * 2.0, rd);
   }
   float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
   if (lum > 40.0) col *= 40.0 / lum;
@@ -159,8 +168,10 @@ layout(location = 1) in vec4 aA;   // p0.xyz, t0
 layout(location = 2) in vec4 aB;   // v0.xyz, r0
 layout(location = 3) in vec4 aC;   // tau, life, seed, density
 uniform mat4 uViewProj; uniform vec3 uCamPos, uCamR, uCamU, uCamF;
-uniform float uTime, uG, uMist; uniform vec2 uRes; uniform vec2 uJit; uniform vec2 uLensShift;
-out vec2 vUV; out vec3 vP; out float vA; out float vR; out float vZ;
+uniform float uTime, uG, uMist, uAmbient; uniform vec2 uRes; uniform vec2 uJit; uniform vec2 uLensShift;
+uniform vec3 uL0c, uL0u, uL0v, uL0e, uL1c, uL1u, uL1v, uL1e;
+out vec2 vUV; out vec3 vP; out float vA; out float vR; out float vZ; out vec3 vL;
+float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * c, 1.5)); }
 void main() {
   float dt = uTime - aA.w;
   if (dt < 0.0 || dt > aC.y * 1.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
@@ -176,29 +187,25 @@ void main() {
   gl_Position = uViewProj * vec4(w, 1.0);
   gl_Position.xy += (uJit * 2.0 / uRes + uLensShift) * gl_Position.w;
   vUV = aCorner * 1.8; vP = p; vA = a; vR = r; vZ = dot(w - uCamPos, uCamF);
+  // single scattering of both softboxes (Henyey-Greenstein, forward peaked): constant across a puff
+  vec3 v = normalize(uCamPos - p), d0 = p - uL0c, d1 = p - uL1c;
+  float a0 = 4.0 * length(uL0u) * length(uL0v) * max(dot(normalize(cross(uL0u, uL0v)), normalize(d0)), 0.0) / dot(d0, d0);
+  float a1 = 4.0 * length(uL1u) * length(uL1v) * max(dot(normalize(cross(uL1u, uL1v)), normalize(d1)), 0.0) / dot(d1, d1);
+  vL = uL0e * a0 * hg(dot(normalize(d0), v), 0.72) + uL1e * a1 * hg(dot(normalize(d1), v), 0.72) + vec3(uAmbient) * 0.35;
 }`;
 WB_GLSL.mistFS = `
 uniform sampler2D uDepthTex;
-in vec2 vUV; in vec3 vP; in float vA; in float vR; in float vZ;
+in vec2 vUV; in vec3 vP; in float vA; in float vR; in float vZ; in vec3 vL;
 out vec4 oColor;
-float hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * c, 1.5)); }
 void main() {
   float d2 = dot(vUV, vUV);
-  float n = noised(vec3(vUV * 1.7, vP.x * 40.0 + vP.z * 31.0)).x;
+  float n = vnoise2(vUV * 1.7 + vec2(vP.x * 40.0 + vP.z * 31.0, vP.y * 37.0));
   float w = exp(-2.6 * d2) * (0.6 + 0.8 * n);
   float zs = texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r;
   float soft = clamp((zs - vZ) / max(vR, 0.004), 0.0, 1.0);
   float a = clamp(vA * w * soft, 0.0, 0.95);
   if (a < 1e-4) discard;
-  vec3 v = normalize(uCamPos - vP);
-  vec3 L = vec3(0.0);
-  vec3 d0 = vP - uL0c, d1 = vP - uL1c;
-  float a0 = 4.0 * length(uL0u) * length(uL0v) * max(dot(normalize(cross(uL0u, uL0v)), normalize(d0)), 0.0) / dot(d0, d0);
-  float a1 = 4.0 * length(uL1u) * length(uL1v) * max(dot(normalize(cross(uL1u, uL1v)), normalize(d1)), 0.0) / dot(d1, d1);
-  L += uL0e * a0 * hg(dot(normalize(d0), v), 0.72);
-  L += uL1e * a1 * hg(dot(normalize(d1), v), 0.72);
-  L += vec3(uAmbient) * 0.35;
-  oColor = vec4(L * a, a);
+  oColor = vec4(vL * a, a);
 }`;
 
 // ---- post

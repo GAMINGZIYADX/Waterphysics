@@ -47,19 +47,19 @@ var WB_Core = (function () {
     ['Lighting', 'keyAz', 'Key azimuth', -180, 180, 1, 38, '°', ''],
     ['Lighting', 'keyEl', 'Key elevation', -10, 85, 1, 30, '°', ''],
     ['Lighting', 'keySize', 'Key size', 0.1, 2, 0.01, 0.9, 'm', ''],
-    ['Lighting', 'rimIntensity', 'Backlight strip', 0, 120, 0.5, 45, '', ''],
+    ['Lighting', 'rimIntensity', 'Backlight strip', 0, 120, 0.5, 32, '', ''],
     ['Lighting', 'rimAz', 'Backlight azimuth', -180, 180, 1, -150, '°', ''],
     ['Lighting', 'rimEl', 'Backlight elevation', 0, 85, 1, 42, '°', ''],
     ['Lighting', 'ambient', 'Ambient fill', 0, 0.4, 0.005, 0.05, '', ''],
     ['Lighting', 'backdrop', 'Backdrop albedo', 0, 0.8, 0.01, 0.07, '', ''],
     ['Lighting', 'exposure', 'Exposure', -3, 3, 0.05, 0, 'EV', ''],
     ['Camera', 'fov', 'Field of view', 12, 75, 0.5, 30, '°', ''],
-    ['Camera', 'renderScale', 'Render resolution', 0.3, 1, 0.05, 0.75, '×', ''],
+    ['Camera', 'renderScale', 'Render resolution (temporally upsampled)', 0.3, 1, 0.05, 0.75, '×', ''],
     ['Camera', 'maxSamples', 'Frozen-frame samples', 1, 256, 1, 64, '', ''],
     ['Camera', 'surfaceDetail', 'Surface micro-detail', 0, 3, 0.05, 1, '×', ''],
-    ['Physics', 'surfaceSmooth', 'Surface smoothing passes', 0, 2, 1, 1, '', 'view'],
+    ['Physics', 'surfaceSmooth', 'Surface smoothing passes', 0, 3, 1, 2, '', 'view'],
     ['Camera', 'fstop', 'Aperture (f-stop, frozen frames)', 1.4, 22, 0.1, 4, '', ''],
-    ['Camera', 'shutter', 'Shutter (µs, frozen frames)', 0, 200, 1, 5, 'µs', ''],
+    ['Camera', 'shutter', 'Shutter (µs, frozen frames)', 0, 200, 0.5, 1, 'µs', ''],
     ['Camera', 'bloom', 'Bloom', 0, 3, 0.05, 1, '×', ''],
     ['Camera', 'grain', 'Film grain', 0, 3, 0.05, 1, '×', ''],
     ['Camera', 'vignette', 'Vignette', 0, 1, 0.01, 0.35, '', '']
@@ -76,13 +76,14 @@ var WB_Core = (function () {
     'function postWet(j){ var w = j.wet.slice(); self.postMessage({type:"wet", id:j.id, wet:w, res:WB_SIM.WET_RES, half:WB_SIM.WET_HALF}, [w.buffer]); }',
     'function pump(){ var j = job; if (!j) return; var t0 = Date.now();',
     '  while (Date.now() - t0 < slice && !j.done) { var f = j.advance(); if (f) {',
-    '    self.postMessage({type:"frame", id:j.id, index:f.index, t:f.t, pos:f.pos, flags:f.flags, aer:f.aer}, [f.pos.buffer, f.flags.buffer, f.aer.buffer]);',
+    '    var tr = [f.pos.buffer, f.flags.buffer, f.aer.buffer, f.mem.buffer]; if (f.det) tr.push(f.det.buffer);',
+    '    self.postMessage({type:"frame", id:j.id, index:f.index, t:f.t, pos:f.pos, flags:f.flags, aer:f.aer, mem:f.mem, det:f.det, peelEnd:f.peelEnd}, tr);',
     '    if (f.index % 12 === 0) postWet(j); } }',
     '  if (j.done) { postWet(j); self.postMessage({type:"done", id:j.id}); if (job === j) job = null; return; }',
     '  setTimeout(pump, 0); }',
     'self.onmessage = function(e){ var m = e.data;',
     '  if (m.type === "bake") { slice = m.slice || 35; try { job = new WB_SIM.Bake(m.params, m.id); } catch (err) { self.postMessage({type:"error", id:m.id, msg:String(err && err.stack || err)}); return; }',
-    '    self.postMessage({type:"meta", id:m.id, N:job.N, s:job.s, rdrop:job.rdrop, frames:job.frames}); setTimeout(pump, 0); }',
+    '    self.postMessage({type:"meta", id:m.id, N:job.N, s:job.s, rdrop:job.rdrop, frames:job.frames, mem:job.mem.meta()}); setTimeout(pump, 0); }',
     '  else if (m.type === "stop") job = null; };'
   ].join('\n');
 
@@ -111,10 +112,86 @@ var WB_Core = (function () {
     this.fluid = new Float32Array(this.N * 36);
     this.kz = new Int32Array(this.N);
     this.com0 = null;
+    // simulated latex: static mesh + per-frame vertex positions + detach times
+    var mm = this.mm = meta.mem || null;
+    this.peelEnd = 0; this.detVer = 0; this.detT = 0;
+    if (mm) {
+      this.memP = new Float32Array(mm.nc * 3); this.memN = new Float32Array(mm.nc * 3); this.memArea = new Float32Array(mm.nc);
+      this.memVtx = new Float32Array(mm.nc * 7); this.memIdx = new Uint16Array(mm.nt * 3);
+      this.det = new Float32Array(mm.nc).fill(1e9); this.detO = new Float32Array(mm.nv0).fill(1e9);
+    }
   }
   Store.prototype.add = function (m) {
-    this.frames[m.index] = { pos: m.pos, flags: m.flags, aer: m.aer };
+    this.frames[m.index] = { pos: m.pos, flags: m.flags, aer: m.aer, mem: m.mem };
     while (this.count < this.frames.length && this.frames[this.count]) this.count++;
+    if (m.det && this.mm) {                          // latex that has left the water, per copy -> per mesh vertex
+      this.det = m.det; this.detT = Math.max(this.detT, m.t); this.detVer++;
+      var dO = this.detO.fill(1e9), co = this.mm.copyOf;
+      for (var c = 0; c < m.det.length; c++) if (m.det[c] < dO[co[c]]) dO[co[c]] = m.det[c];
+    }
+    if (m.peelEnd && !this.peelEnd) this.peelEnd = m.peelEnd;
+  };
+  /* time the latex left direction (x,y,z) from the balloon centre (nearest mesh vertex) */
+  Store.prototype.peelAt = function (x, y, z) {
+    var mm = this.mm, d = mm.dir0, cs = 0.045, G = this.dirGrid, key = function (a, b, c) { return ((a + 64) * 128 + (b + 64)) * 128 + (c + 64); };
+    if (!G) {
+      G = this.dirGrid = new Map();
+      for (var i = 0; i < mm.nv0; i++) {
+        var k = key(Math.floor(d[3 * i] / cs), Math.floor(d[3 * i + 1] / cs), Math.floor(d[3 * i + 2] / cs)), L = G.get(k);
+        if (!L) G.set(k, L = []); L.push(i);
+      }
+    }
+    var l = Math.hypot(x, y, z) || 1; x /= l; y /= l; z /= l;
+    var a = Math.floor(x / cs), b = Math.floor(y / cs), c = Math.floor(z / cs), best = 0, bd = 1e9;
+    for (var ia = a - 1; ia <= a + 1; ia++) for (var ib = b - 1; ib <= b + 1; ib++) for (var ic = c - 1; ic <= c + 1; ic++) {
+      var LL = G.get(key(ia, ib, ic)); if (!LL) continue;
+      for (var j = 0; j < LL.length; j++) {
+        var v = LL[j], dx = d[3 * v] - x, dy = d[3 * v + 1] - y, dz = d[3 * v + 2] - z, dd = dx * dx + dy * dy + dz * dz;
+        if (dd < bd) { bd = dd; best = v; }
+      }
+    }
+    return this.detO[best];
+  };
+  /* Rubber mesh at time t: interpolated positions, normals, relative thickness, and the
+     triangles that have left the water (the latex still on the water is ray traced). */
+  Store.prototype.assembleMem = function (i, j, w, t) {
+    var mm = this.mm, A = this.frames[i].mem, B = this.frames[j].mem, nc = mm.nc, P = this.memP, c, a3;
+    var k0 = QSPAN[0] / 65535, k1 = QSPAN[1] / 65535, k2 = QSPAN[2] / 65535;
+    for (c = 0; c < nc; c++) {
+      a3 = 3 * c;
+      P[a3] = QMIN[0] + (A[a3] + (B[a3] - A[a3]) * w + 32768) * k0;
+      P[a3 + 1] = QMIN[1] + (A[a3 + 1] + (B[a3 + 1] - A[a3 + 1]) * w + 32768) * k1;
+      P[a3 + 2] = QMIN[2] + (A[a3 + 2] + (B[a3 + 2] - A[a3 + 2]) * w + 32768) * k2;
+    }
+    var T = mm.tris, die = mm.triDie, det = this.det, all = this.peelEnd > 0 && t >= this.peelEnd;
+    var Nn = this.memN.fill(0), Ar = this.memArea.fill(0), idx = this.memIdx, ni = 0;
+    for (var f = 0; f < mm.nt; f++) {
+      if (die[f] <= t) continue;
+      var a = T[3 * f], b = T[3 * f + 1], d = T[3 * f + 2];
+      var ux = P[3 * b] - P[3 * a], uy = P[3 * b + 1] - P[3 * a + 1], uz = P[3 * b + 2] - P[3 * a + 2];
+      var vx = P[3 * d] - P[3 * a], vy = P[3 * d + 1] - P[3 * a + 1], vz = P[3 * d + 2] - P[3 * a + 2];
+      var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, ar = 0.5 * Math.sqrt(nx * nx + ny * ny + nz * nz) / 3;
+      Nn[3 * a] += nx; Nn[3 * a + 1] += ny; Nn[3 * a + 2] += nz; Ar[a] += ar;
+      Nn[3 * b] += nx; Nn[3 * b + 1] += ny; Nn[3 * b + 2] += nz; Ar[b] += ar;
+      Nn[3 * d] += nx; Nn[3 * d + 1] += ny; Nn[3 * d + 2] += nz; Ar[d] += ar;
+      if (all || det[a] <= t || det[b] <= t || det[d] <= t) { idx[ni++] = a; idx[ni++] = b; idx[ni++] = d; }
+    }
+    var V = this.memVtx, rA = mm.restA, L2 = mm.lambda * mm.lambda;
+    for (c = 0; c < nc; c++) {
+      a3 = 3 * c;
+      var nl = Math.hypot(Nn[a3], Nn[a3 + 1], Nn[a3 + 2]) || 1, o = 7 * c;
+      V[o] = P[a3]; V[o + 1] = P[a3 + 1]; V[o + 2] = P[a3 + 2];
+      V[o + 3] = Nn[a3] / nl; V[o + 4] = Nn[a3 + 1] / nl; V[o + 5] = Nn[a3 + 2] / nl;
+      V[o + 6] = Ar[c] > 1e-12 ? Math.min(16, rA[c] * L2 / Ar[c]) : 1;
+    }
+    return { vtx: V, idx: idx, count: ni, nc: nc };
+  };
+  /* Per-vertex detach times for the ray-traced latex field; vertices still on the water
+     get "shortly after the simulated time" so the tear front interpolates sensibly. */
+  Store.prototype.peelField = function () {
+    var dO = this.detO, out = new Float32Array(dO.length), cap = this.peelEnd > 0 ? 1e4 : (this.count ? Math.max(this.bakedTime(), 0) : 0) + 2e-4;
+    for (var i = 0; i < dO.length; i++) out[i] = Math.min(dO[i], cap);
+    return out;
   };
   Store.prototype.bakedTime = function () { return this.count ? this.times[this.count - 1] : -1; };
 
@@ -149,10 +226,11 @@ var WB_Core = (function () {
       else if (flags[k] & 1) cls[k] = 1;
       else { cls[k] = 0; na++; for (c = 0; c < 3; c++) { mnA[c] = Math.min(mnA[c], P[a + c]); mxA[c] = Math.max(mxA[c], P[a + c]); } }
     }
-    // robust bounds of the airborne water: 0.4%..99.6% quantiles (stray clusters become droplets)
+    // robust bounds of the airborne water: 0.1%..99.9% quantiles (stray clusters become droplets; a
+    // wider cut slices flat faces off an expanding cloud)
     var mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9];
     if (na > 0) {
-      var NB = 512, hist = this.hist || (this.hist = new Int32Array(NB)), cut = Math.floor(na * 0.004);
+      var NB = 1024, hist = this.hist || (this.hist = new Int32Array(NB)), cut = Math.floor(na * 0.001);
       for (c = 0; c < 3; c++) {
         var lo0 = mnA[c], span = Math.max(mxA[c] - lo0, 1e-6);
         hist.fill(0);
@@ -161,7 +239,7 @@ var WB_Core = (function () {
         for (var q = 0; q < NB; q++) { acc += hist[q]; if (acc > cut) { qa = q; break; } }
         acc = 0;
         for (q = NB - 1; q >= 0; q--) { acc += hist[q]; if (acc > cut) { qb = q; break; } }
-        mn[c] = lo0 + qa / NB * span - 3 * this.s; mx[c] = lo0 + (qb + 1) / NB * span + 3 * this.s;
+        mn[c] = lo0 + qa / NB * span - 4 * this.s; mx[c] = lo0 + (qb + 1) / NB * span + 4 * this.s;
       }
       for (k = 0; k < N; k++) {
         if (cls[k] !== 0) continue;
@@ -176,7 +254,7 @@ var WB_Core = (function () {
       nb++; com[0] += P[3 * k]; com[1] += P[3 * k + 1]; com[2] += P[3 * k + 2];
     }
     var out = { t: t, bulk: nb, iso: ni, com: null, vol: null, fluidCount: 0, fluid: this.fluid };
-    if (this.mem && t < this.mem.until) {         // keep the whole latex membrane inside the volume
+    if (this.mem && t < (this.peelEnd > 0 ? this.peelEnd + 0.001 : 1e9)) {   // keep the whole latex membrane inside the volume
       for (c = 0; c < 3; c++) { mn[c] = Math.min(mn[c], this.mem.min[c]); mx[c] = Math.max(mx[c], this.mem.max[c]); }
     }
     if (nb > 0) {
@@ -230,6 +308,7 @@ var WB_Core = (function () {
       }
     }
     out.fluidCount = fc;
+    if (this.mm && A.mem && B.mem) out.mem = this.assembleMem(i, j, w, t);
     return out;
   };
 
@@ -299,7 +378,7 @@ var WB_Core = (function () {
     // floor lamella + crown
     var tI = S.tImpact + 0.0025, vI = U.gravity * S.tImpact;
     u.uImp = [U.gravity > 0.5 ? tI : 1e9, vI, S.C[0], S.C[2]];
-    u.uImp2 = [0.8 * S.R, 0.06 * vI / 3.3, 0, 0];
+    u.uImp2 = [0.8 * S.R, 0.09 * vI / 3.3, 0, 0];
     if (U.gravity > 0.5 && t > tI) {
       var Rm = 0.8 * S.R + 1.4 * vI * 0.09 * 1.2 + 0.05;
       mn = [Math.min(mn[0], S.C[0] - Rm), Math.min(mn[1], -0.005), Math.min(mn[2], S.C[2] - Rm)];
@@ -312,10 +391,12 @@ var WB_Core = (function () {
     var u = {};
     u.uTime = t; u.uG = U.gravity;
     u.uC = S.C; u.uR = S.R; u.uEDir = S.eDir; u.uXDir = S.xDir;
-    u.uTE = 0; u.uTX = S.tX; u.uRate = S.peel.rate; u.uKappa = S.peel.kappa; u.uPeelEnd = S.tPeelEnd; u.uHasExit = S.hasExit ? 1 : 0;
+    // end of the peel as simulated (until the simulation gets there the latex is still on)
+    var pe = store && store.peelEnd > 0 ? store.peelEnd : (store && store.mm ? 1e9 : S.tPeelEnd);
+    u.uTE = 0; u.uTX = S.tX; u.uRate = S.peel.rate; u.uKappa = S.peel.kappa; u.uPeelEnd = pe < 1e8 ? pe : S.tPeelEnd; u.uHasExit = S.hasExit ? 1 : 0;
     var col = COLORS[U.rubberColor] ? COLORS[U.rubberColor].c : COLORS.red.c;
     u.uRubberCol = col; u.uRubberOpacity = U.rubberOpacity;
-    u.uMembrane = t < S.tPeelEnd ? 1 : 0;
+    u.uMembrane = t < pe ? 1 : 0;
     var white = [1.0, 0.975, 0.94];
     var C = S.C;
     var key = rectLight(C, U.keyAz, U.keyEl, 1.6, U.keySize, U.keySize * 1.25, white.map(function (x) { return x * U.keyIntensity; }));
@@ -331,37 +412,93 @@ var WB_Core = (function () {
     // iso level at ~13% of the interior kernel sum (random packing, kernel radius 2.3 s)
     u.uIso = 0.13 * 0.957 * Math.pow(2.3, 3); u.uMemSlope = 1.5 * u.uIso / s; u.uBand = 2.4 * s;
     u.uEU = S.peel.eu; u.uEV = S.peel.ev; u.uXU = S.peel.xu; u.uXV = S.peel.xv;
-    var prog = Math.min(1, Math.max(0, t / S.tPeelEnd));
-    u.uLipH = 0.0007 + 0.0013 * prog; u.uLipW = 0.00007 + 0.00005 * prog;   // rolled rim: 3-5 mm wide, 1-2 mm tall
+    var prog = Math.min(1, Math.max(0, t / S.tPeelEnd)), simMem = !!(store && store.mm);
+    // rolled rim where the latex still lies on the water (the lifted rim itself is the simulated mesh)
+    u.uLipH = simMem ? 0.0003 + 0.0004 * prog : 0.0007 + 0.0013 * prog; u.uLipW = simMem ? 0.00004 : 0.00007 + 0.00005 * prog;
     liquidFeatures(U, S, t, u);
     u.uTent = S.hasExit ? 0.012 * (S.R / 0.075) * smooth(S.tX - 0.00022, S.tX, t) * (1 - smooth(S.tX, S.tX + 0.0003, t)) : 0;
     u.uFlowOff = asm && asm.com && store && store.com0 ? [asm.com[0] - store.com0[0], asm.com[1] - store.com0[1], asm.com[2] - store.com0[2]] : [0, 0, 0];
+    // ripples scale with the shot: impact shock ring on the skin, capillary rings on the bare water
+    u.uShock = 0.0016 * Math.min(2.2, Math.max(0.7, Math.sqrt(S.violence))) * (U.surfaceDetail > 0 ? 1 : 0);
+    // blast inflation of the skin (same law as the membrane's contact surface); drawn by the ring pass
+    u.uBlastV = S.blast > 0.02 ? S.blastV * U.energyTransfer * 0.9 : 0;
+    u.uEntry = S.entry; u.uBK = S.k; u.uBV0 = S.v0; u.uBL = S.L;
+    u.uBulgeMax = u.uBlastV > 0 ? Math.min(38, u.uBlastV * 2.2) * Math.max(t, 0) + 0.001 : 0;
+    u.uCapRing = 0.35 * Math.min(2.0, Math.max(0.6, Math.sqrt(S.violence))) * U.surfaceDetail;
     u.uRipple = 1; u.uDetail = U.surfaceDetail; u.uClarity = U.latexClarity; u.uBubble = 45 * U.bubbles; u.uMist = U.mistAmount > 0 ? 1 : 0;
     // bullet
     var sb = SH.bulletS(S, t);
     var tip = [S.entry[0] + sb, S.entry[1], S.entry[2]];
     u.uBulletTip = tip; u.uBulletDir = S.dir;
-    // true-to-scale bullet design: ogive / round-nose / diabolo profile, meplat, boat-tail, cannelure, jacket
-    var bs = S.bullet, Rb = S.d / 2, Lb = bs.len * S.d, Ln = bs.nose * S.d, rm = bs.meplat * Rb, x0 = 0;
-    if (bs.type === 1) x0 = Ln * (1 - Math.sqrt(Math.max(0, 1 - (rm / Rb) * (rm / Rb))));
-    else if (bs.type === 0) { var rho = (Rb * Rb + Ln * Ln) / (2 * Rb), yy = rm - Rb + rho; x0 = Ln - Math.sqrt(Math.max(0, rho * rho - yy * yy)); }
-    u.uBulletR = Rb; u.uBulletLen = Lb; u.uBulletX0 = x0;
-    u.uBS = [Ln, rm, bs.bt * S.d, bs.base * Rb];
-    u.uBS2 = [bs.type, bs.can > 0 ? bs.can * Lb : 0, 0.012 * S.d, bs.lead];
-    u.uBulletF0 = bs.f0; u.uBulletRough = bs.rough;
+    u.uBulletR = S.d / 2; u.uBulletLen = S.bullet.len * S.d;
+    u.uBulletF0 = S.bullet.f0; u.uBulletRough = S.bullet.rough;       // jacket (gilding metal / copper / brass) or lead
     u.uBulletOn = tip[0] < 3.0 ? 1 : 0;
-    // latex neck / knot / crumpled wad, recoiling on the string after the pop
-    var te = S.tPeelEnd, tr = t - 0.65 * te, dy = 0;
-    if (tr > 0) { var w = 2 * Math.PI * 4.5, z = 0.22; dy = (2.2 / w) * Math.exp(-z * w * tr) * Math.sin(w * tr); }
+    // latex neck / knot, recoiling on the string after the pop (the rag hanging from it is the simulated mesh)
+    var te = S.tPeelEnd, dy = SH.knotDY(S, t);
     u.uKnotPos = [S.knot[0], S.knot[1] + dy, S.knot[2]];
     u.uWadPos = [S.knot[0], S.knot[1] + dy - 0.007, S.knot[2]];
-    u.uWadR = 0.012 * (S.R / 0.075) * smooth(0.45 * te, te, t);
-    u.uNeckOn = 1 - smooth(0.45 * te, 0.9 * te, t);
+    u.uWadR = simMem ? 0 : 0.012 * (S.R / 0.075) * smooth(0.45 * te, te, t);
+    u.uNeckOn = simMem ? 1 - smooth(pe, pe + 0.004, t) : 1 - smooth(0.45 * te, 0.9 * te, t);
     u.uTopY = S.topY;
     return u;
   }
   function smooth(a, b, x) { var t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
 
+  /* Bullet mesh: the design's true profile (WB_SHARED.BULLETS, in calibres) revolved about the
+     flight line.  Vertex: [distance behind the tip, radius, angle, axial normal, radial normal,
+     material (0 jacket, 1 lead, 2 cannelure groove)]. */
+  function bulletMesh(S) {
+    var bs = S.bullet, d = S.d, Rb = d / 2, L = bs.len * d, Ln = bs.nose * d, rm = bs.meplat * Rb;
+    var Lbt = bs.bt * d, Rbase = bs.base * Rb, xc = bs.can > 0 ? bs.can * L : -1, dc = 0.012 * d;
+    function prof(x) {
+      var y = Rb;
+      if (bs.type === 2) {                            // diabolo: domed head, narrow waist, flared skirt
+        var xh = 0.4 * L, xw = 0.53 * L;
+        if (x < xh) { var e = (xh - x) / xh; return Rb * Math.sqrt(Math.max(1 - e * e, 0)); }
+        return x < xw ? Rb - 0.4 * Rb * (x - xh) / (xw - xh) : 0.6 * Rb + 0.44 * Rb * (x - xw) / (L - xw);
+      }
+      if (x < Ln) {
+        var u = Ln - x;
+        if (bs.type === 1) { var e1 = u / Ln; y = Rb * Math.sqrt(Math.max(1 - e1 * e1, 0)); }     // round nose
+        else { var rho = (Rb * Rb + Ln * Ln) / (2 * Rb); y = Math.sqrt(Math.max(rho * rho - u * u, 0)) + Rb - rho; }  // tangent ogive
+      } else if (x > L - Lbt) y = Rb - (x - (L - Lbt)) * (Rb - Rbase) / Lbt;                   // boat-tail
+      if (xc > 0) y -= dc * (1 - smooth(0, 4 * dc, Math.abs(x - xc)));                           // crimp groove
+      return Math.max(y, 0);
+    }
+    var x0 = 0;                                        // flat meplat face
+    if (bs.type === 1) x0 = Ln * (1 - Math.sqrt(Math.max(0, 1 - (rm / Rb) * (rm / Rb))));
+    else if (bs.type === 0) { var rho0 = (Rb * Rb + Ln * Ln) / (2 * Rb), yy = rm - Rb + rho0; x0 = Ln - Math.sqrt(Math.max(0, rho0 * rho0 - yy * yy)); }
+    var xs = [], i, k;
+    var noseEnd = bs.type === 2 ? 0.4 * L : Ln;
+    for (i = 0; i <= 48; i++) { var s = i / 48; xs.push(x0 + (noseEnd - x0) * s * s * (2 - s) * 0.5 + (noseEnd - x0) * s * 0.5); }
+    for (i = 1; i <= 40; i++) xs.push(noseEnd + (L - noseEnd) * i / 40);
+    var NS = 48, V = [], I = [];
+    function ring(x, y, na, nr, mat) {
+      var base = V.length / 6;
+      for (var j = 0; j <= NS; j++) V.push(x, y, j / NS * 2 * Math.PI, na, nr, mat);
+      return base;
+    }
+    function strip(a, b) { for (var j = 0; j < NS; j++) I.push(a + j, b + j, a + j + 1, a + j + 1, b + j, b + j + 1); }
+    // side: normal of the surface of revolution from the profile slope
+    var prev = -1;
+    for (i = 0; i < xs.length; i++) {
+      var x = xs[i], h = Math.max(1e-6 * d, 0.002 * L), sl = (prof(Math.min(L, x + h)) - prof(Math.max(x0, x - h))) / (Math.min(L, x + h) - Math.max(x0, x - h));
+      var nl = Math.sqrt(1 + sl * sl), mat = bs.lead === 2 ? 1 : (xc > 0 && Math.abs(x - xc) < 4 * dc ? 2 : 0);
+      var r0 = ring(x, prof(x), -sl / nl, 1 / nl, mat);
+      if (prev >= 0) strip(prev, r0);
+      prev = r0;
+    }
+    // meplat face (forward) and base (backward, exposed lead core on FMJ)
+    var cap = function (x, rOut, rIn, na, matOut, matIn, flip) {
+      var a = ring(x, rOut, na, 0, matOut), b = ring(x, rIn, na, 0, matOut), c = ring(x, rIn, na, 0, matIn), e = ring(x, 0, na, 0, matIn);
+      if (flip) { strip(b, a); strip(e, c); } else { strip(a, b); strip(c, e); }
+    };
+    var tipMat = bs.lead === 2 ? 1 : 0, baseLead = bs.lead >= 1 ? 1 : 0;
+    cap(x0, prof(x0), prof(x0) * 0.5, -1, tipMat, tipMat, true);
+    cap(L, prof(L), prof(L) * (bs.lead === 1 ? 0.8 : 0.5), 1, bs.lead === 2 ? 1 : 0, baseLead, false);
+    return { vtx: new Float32Array(V), idx: new Uint16Array(I) };
+  }
+
   return { PRESETS: PRESETS, COLORS: COLORS, SPEC: SPEC, defaults: defaults, makeWorker: makeWorker, Store: Store,
-           sceneUniforms: sceneUniforms };
+           sceneUniforms: sceneUniforms, bulletMesh: bulletMesh };
 })();

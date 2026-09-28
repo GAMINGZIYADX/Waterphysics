@@ -6,7 +6,7 @@ uniform sampler3D uVol;       // R: particle density field, G: density * aeratio
 uniform vec3  uVolMin, uVolSize;
 uniform float uCell;          // voxel size [m]
 uniform int   uHasVol, uMembrane;
-uniform float uIso, uMemSlope, uBand;
+uniform float uIso, uMemSlope, uBand, uBulgeMax;   // uBulgeMax: bound on the blast inflation of the skin [m]
 uniform sampler2D uWet;       // time each floor texel first got wet
 uniform float uWetHalf;
 uniform vec3  uBulletTip, uBulletDir; uniform float uBulletR, uBulletLen; uniform int uBulletOn;
@@ -100,7 +100,7 @@ float field(vec3 p) {
   vec3 d = p - uC; float l = length(d);
   if (l < uR * 0.72) return f;
   float sd0 = l - uR * shapeR(d.y / l);
-  if (sd0 > 2.5 * uBand + uTent + uLipH || sd0 < -uBand) return f;
+  if (sd0 > 2.5 * uBand + uTent + uLipH + uBulgeMax || sd0 < -uBand) return f;
   float dtp; float sd = memSD(p, dtp);
   if (dtp <= 0.0) return f;
   float fm = uIso - sd * uMemSlope;             // continuous across the latex surface
@@ -151,65 +151,23 @@ float sdRubber(vec3 p) {
   }
   return d;
 }
-// ---- bullets: a surface of revolution per design (true dimensions, see WB_SHARED.BULLETS)
-uniform vec4 uBS;     // ogive length, meplat radius, boat-tail length, base radius [m]
-uniform vec4 uBS2;    // profile (0 spitzer, 1 round nose, 2 diabolo), cannelure position [m behind tip], cannelure depth, lead (0 jacket, 1 lead base, 2 bare lead)
-uniform float uBulletX0;   // where the flat meplat face sits behind the ideal point
-uniform vec3 uBulletF0; uniform float uBulletRough;
-// radius of the profile x metres behind the tip, and its slope dr/dx
-float bulletY(float x, out float sl) {
-  float Rb = uBulletR, L = uBulletLen, Ln = uBS.x, y = Rb; sl = 0.0;
-  if (uBS2.x > 1.5) {                               // diabolo pellet: domed head, narrow waist, flared skirt
-    float xh = 0.4 * L, xw = 0.53 * L;
-    if (x < xh) { float e = (xh - x) / xh, s = sqrt(max(1.0 - e * e, 2e-3)); y = Rb * s; sl = Rb * e / (xh * s); }
-    else if (x < xw) { y = mix(Rb, 0.6 * Rb, (x - xh) / (xw - xh)); sl = -0.4 * Rb / (xw - xh); }
-    else { y = mix(0.6 * Rb, 1.04 * Rb, (x - xw) / (L - xw)); sl = 0.44 * Rb / (L - xw); }
-    return y;
-  }
-  if (x < Ln) {
-    float u = Ln - x;
-    if (uBS2.x > 0.5) { float e = u / Ln, s = sqrt(max(1.0 - e * e, 2e-3)); y = Rb * s; sl = Rb * e / (Ln * s); }   // round nose
-    else { float rho = (Rb * Rb + Ln * Ln) / (2.0 * Rb), s = sqrt(max(rho * rho - u * u, 1e-12)); y = s + Rb - rho; sl = u / s; }  // tangent ogive
-  } else if (x > L - uBS.z) {                       // boat-tail
-    float k = (Rb - uBS.w) / max(uBS.z, 1e-6);
-    y = Rb - (x - L + uBS.z) * k; sl = -k;
-  }
-  if (uBS2.y > 0.0) y -= uBS2.z * (1.0 - smoothstep(0.0, 4.0 * uBS2.z, abs(x - uBS2.y)));   // crimp groove
-  return y;
-}
-float sdBullet(vec3 p) {
-  vec3 q = p - uBulletTip;
-  float x = -dot(q, uBulletDir), r = length(q + uBulletDir * x), sl;
-  float y = bulletY(clamp(x, uBulletX0, uBulletLen), sl);
-  float d = max((r - y) / sqrt(1.0 + sl * sl), max(uBulletX0 - x, x - uBulletLen));
-  return d * 0.85;
-}
-// jacket (gilding metal / copper / brass) with an exposed lead base on FMJ bullets, or bare lead
-void bulletMat(vec3 p, out vec3 F0, out float rough) {
-  vec3 q = p - uBulletTip;
-  float x = -dot(q, uBulletDir), r = length(q + uBulletDir * x);
-  bool lead = uBS2.w > 1.5 || (uBS2.w > 0.5 && x > uBulletLen - 1.5e-4 && r < 0.8 * uBS.w);
-  F0 = lead ? vec3(0.55, 0.56, 0.59) : uBulletF0;
-  rough = lead ? 0.45 : uBulletRough * (0.8 + 0.4 * vnoise2(vec2(x * 7000.0, 3.0)));   // faint drawing marks
-  if (!lead && uBS2.y > 0.0 && abs(x - uBS2.y) < 4.0 * uBS2.z) { F0 *= 0.82; rough += 0.15; }   // knurled cannelure
-}
-float sdWhich(vec3 p, int which) { return which == 4 ? sdRubber(p) : sdBullet(p); }
-vec3 sdNormal(vec3 p, int which) {
+// (the bullet is a rasterised mesh drawn after the ray tracer: see glsl_rubber.js)
+vec3 sdNormal(vec3 p) {
   vec3 g = vec3(0.0);
   for (int k = 0; k < 4 * uL1; k++) {
     vec3 o = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;
-    g += o * sdWhich(p + o * 1e-4, which);
+    g += o * sdRubber(p + o * 1e-4);
   }
   return normalize(g);
 }
-float sphereTrace(vec3 ro, vec3 rd, vec3 cen, float rad, float tmax, int which) {
+float sphereTrace(vec3 ro, vec3 rd, vec3 cen, float rad, float tmax) {
   vec3 oc = ro - cen; float b = dot(oc, rd), c = dot(oc, oc) - rad * rad, disc = b * b - c;
   if (disc < 0.0) return 1e9;
   float t = max(-b - sqrt(disc), 0.0), t1 = min(-b + sqrt(disc), tmax);
   for (int i = 0; i < 64 * uL1; i++) {
     if (t > t1) break;
     vec3 p = ro + rd * t;
-    float d = sdWhich(p, which);
+    float d = sdRubber(p);
     if (d < 2e-5 * (1.0 + t)) return t;
     t += max(d, 1e-5);
   }
@@ -227,15 +185,10 @@ Hit traceOpaque(vec3 ro, vec3 rd, bool withLights) {
     float ts = (-b - sqrt(disc)) / a; float y = ro.y + rd.y * ts;
     if (ts > 0.0 && ts < h.t && y > uKnotPos.y && y < 4.5) { h.t = ts; h.n = normalize(vec3(o + d * ts, 0.0).xzy); h.m = 3; }
   }
-  // sphere-traced SDF objects: latex knot/neck/wad (4) and the bullet (5), one call site
-  int bestW = 0;
-  for (int w = 4; w <= 4 + uBulletOn * uL1; w++) {
-    vec3 cen = w == 4 ? 0.5 * (uKnotPos + vec3(uC.x, uTopY, uC.z)) : uBulletTip - uBulletDir * uBulletLen * 0.5;
-    float rad = w == 4 ? 0.5 * length(uKnotPos - vec3(uC.x, uTopY, uC.z)) + 0.012 + 1.6 * uWadR + length(uWadPos - uKnotPos) : uBulletLen * 0.6 + uBulletR;
-    float ts = sphereTrace(ro, rd, cen, rad, h.t, w);
-    if (ts < h.t) { h.t = ts; bestW = w; }
-  }
-  if (bestW > 0) { h.n = sdNormal(ro + rd * h.t, bestW); h.m = bestW; }
+  // sphere-traced latex knot / neck
+  vec3 cen = 0.5 * (uKnotPos + vec3(uC.x, uTopY, uC.z));
+  float ts = sphereTrace(ro, rd, cen, 0.5 * length(uKnotPos - vec3(uC.x, uTopY, uC.z)) + 0.012 + 1.6 * uWadR + length(uWadPos - uKnotPos), h.t);
+  if (ts < h.t) { h.t = ts; h.n = sdNormal(ro + rd * ts); h.m = 4; }
   if (withLights) {
     float tl;
     if (hitRect(ro, rd, uL0c, uL0u, uL0v, tl) && tl < h.t) { h.t = tl; h.m = 6; }
@@ -282,8 +235,9 @@ float waterAO(vec3 p, vec3 n) {
   }
   return clamp(1.0 - 0.55 * o, 0.0, 1.0);
 }
+uniform vec2 uLJ;           // playback: one softbox sample point per frame for all pixels (the temporal resolve softens it)
 vec3 lightSample(vec3 c, vec3 hu, vec3 hv) {
-  if (uAccum < 0.5) return c;
+  if (uAccum < 0.5) return c + hu * uLJ.x * 0.9 + hv * uLJ.y * 0.9;
   vec2 r = vec2(hash2(FRAGXY * 1.37 + uRand * 91.0), hash2(FRAGXY.yx * 2.11 + uRand * 57.0)) * 2.0 - 1.0;
   return c + hu * r.x * 0.9 + hv * r.y * 0.9;
 }
@@ -299,8 +253,8 @@ float floorWet(vec2 xz) {
   float w00 = smoothstep(0.0, 0.01, dt0 - texelFetch(uWet, b0, 0).r), w10 = smoothstep(0.0, 0.01, dt0 - texelFetch(uWet, ivec2(b1.x, b0.y), 0).r);
   float w01 = smoothstep(0.0, 0.01, dt0 - texelFetch(uWet, ivec2(b0.x, b1.y), 0).r), w11 = smoothstep(0.0, 0.01, dt0 - texelFetch(uWet, b1, 0).r);
   float wb = mix(mix(w00, w10, fr.x), mix(w01, w11, fr.x), fr.y);
-  float edge = 0.3 + 0.4 * vnoise2(xz * 380.0);
-  float w = smoothstep(edge - 0.15, edge + 0.15, wb);
+  float edge = 0.3 + 0.4 * vnoise2(xz * 110.0);                 // rounded, lobed wet edge (not a saw-tooth)
+  float w = smoothstep(edge - 0.2, edge + 0.2, wb);
   float tt = uTime - uImp.x;
   if (tt > 0.0) { vec2 d = xz - uImp.zw; float Rf = lamellaR(tt, atan(d.y, d.x)); w = max(w, smoothstep(Rf + 0.006, Rf - 0.006, length(d))); }
   return w;

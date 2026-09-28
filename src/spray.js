@@ -48,7 +48,10 @@ var WB_SPRAY = (function () {
     return t0 + 4;
   }
 
-  function generate(S, U) {
+  /* peelFn(x,y,z) -> time the latex leaves that direction (from the membrane simulation once
+     it is known, otherwise the analytic estimate); peelEnd -> end of the peel */
+  function generate(S, U, peelFn, peelEnd) {
+    var pf = peelFn || function (x, y, z) { return SH.peelT(x, y, z, S.peel); }, pEnd = peelEnd || S.tPeelEnd;
     var rnd = SH.rng(1000 + Math.round(U.bulletSpeed * 7 + U.balloonRadius * 131 + U.impactOffset * 17 + U.bulletMass * 29));
     var g = U.gravity, drops = [], mist = [], land = [];
     var amt = U.sprayAmount, mamt = U.mistAmount;
@@ -68,7 +71,7 @@ var WB_SPRAY = (function () {
     }
 
     var bx = S.dir;                       // bullet direction (+x)
-    var nEx = Math.round(6500 * amt * eScale), nEn = Math.round(2200 * amt * eScale);
+    var nEx = Math.round(6500 * amt * eScale), nEn = Math.round(1500 * amt * eScale);   // back-spray ~1/4 of the exit
 
     // ---------------- exit plume: fine fast spray on the axis, coarser & slower toward the cone edge
     if (S.hasExit) {
@@ -108,11 +111,11 @@ var WB_SPRAY = (function () {
       r = Math.min(Math.max(logn(rnd, 0.0002 * Math.pow(6 / sp, 0.4), 0.6), 3e-5), 0.0018);
       drop(p, [d[0] * sp, d[1] * sp, d[2] * sp], t0, r);
     }
-    for (i = 0; i < Math.round(110 * mamt * eScale); i++) {
-      sp = 2 + 18 * rnd() * eScale; t0 = rnd() * 1.0e-3;
+    for (i = 0; i < Math.round(70 * mamt * eScale); i++) {
+      sp = 2 + 14 * rnd() * eScale; t0 = rnd() * 1.0e-3;
       d = cone(rnd, back, 50 * Math.PI / 180, 1.0);
-      puff([S.entry[0], S.entry[1] + (rnd() - 0.5) * 0.012, S.entry[2] + (rnd() - 0.5) * 0.012], [d[0] * sp, d[1] * sp, d[2] * sp],
-           t0, 0.003 + 0.003 * rnd(), 0.08 + 0.06 * rnd(), 0.07 + 0.1 * rnd());
+      puff([S.entry[0], S.entry[1] + (rnd() - 0.5) * 0.01, S.entry[2] + (rnd() - 0.5) * 0.01], [d[0] * sp, d[1] * sp, d[2] * sp],
+           t0, 0.002 + 0.002 * rnd(), 0.05 + 0.04 * rnd(), 0.06 + 0.08 * rnd());
     }
 
     // ---------------- collapse jets: when the cavity closes, water squirts out of both holes
@@ -134,13 +137,13 @@ var WB_SPRAY = (function () {
     for (i = 0; i < nRim; i++) {
       var cth = 1 - 2 * rnd(), sth = Math.sqrt(1 - cth * cth), phi = rnd() * 6.2832;
       var dir = [sth * Math.cos(phi), cth, sth * Math.sin(phi)];
-      var tp = SH.peelT(dir[0], dir[1], dir[2], S.peel);
-      if (tp > S.tPeelEnd * 0.98) continue;
+      var tp = pf(dir[0], dir[1], dir[2]);
+      if (tp > pEnd * 0.98) continue;
       var rr0 = S.R * SH.shapeR(dir[1]) * 1.004;
       p = [S.C[0] + dir[0] * rr0, S.C[1] + dir[1] * rr0, S.C[2] + dir[2] * rr0];
-      var e = 0.02, Bt = basis(dir);
-      var g1 = SH.peelT(dir[0] + e * Bt[0][0], dir[1] + e * Bt[0][1], dir[2] + e * Bt[0][2], S.peel) - SH.peelT(dir[0] - e * Bt[0][0], dir[1] - e * Bt[0][1], dir[2] - e * Bt[0][2], S.peel);
-      var g2 = SH.peelT(dir[0] + e * Bt[1][0], dir[1] + e * Bt[1][1], dir[2] + e * Bt[1][2], S.peel) - SH.peelT(dir[0] - e * Bt[1][0], dir[1] - e * Bt[1][1], dir[2] - e * Bt[1][2], S.peel);
+      var e = 0.05, Bt = basis(dir);
+      var g1 = pf(dir[0] + e * Bt[0][0], dir[1] + e * Bt[0][1], dir[2] + e * Bt[0][2]) - pf(dir[0] - e * Bt[0][0], dir[1] - e * Bt[0][1], dir[2] - e * Bt[0][2]);
+      var g2 = pf(dir[0] + e * Bt[1][0], dir[1] + e * Bt[1][1], dir[2] + e * Bt[1][2]) - pf(dir[0] - e * Bt[1][0], dir[1] - e * Bt[1][1], dir[2] - e * Bt[1][2]);
       var gt = norm([g1 * Bt[0][0] + g2 * Bt[1][0], g1 * Bt[0][1] + g2 * Bt[1][1], g1 * Bt[0][2] + g2 * Bt[1][2]]);
       var vt = (0.05 + 0.2 * Math.pow(rnd(), 1.5)) * U.peelSpeed, vn = 0.4 + 2.2 * rnd();
       r = Math.min(Math.max(logn(rnd, 0.0001, 0.6), 3e-5), 0.0008);
@@ -162,8 +165,10 @@ var WB_SPRAY = (function () {
         var sp2 = S.blastV * (0.5 + 0.9 * rnd()) * Math.min(2.2, Math.max(0.6, 0.05 / rax));
         var db = norm([dir[0] * 0.45 + bx[0] * 0.25 + (rnd() - 0.5) * 0.3, ry / rax * 0.8 + dir[1] * 0.45 + (rnd() - 0.5) * 0.3, rz / rax * 0.8 + dir[2] * 0.45 + (rnd() - 0.5) * 0.3]);
         r = Math.min(Math.max(logn(rnd, 0.00045, 0.7), 5e-5), 0.003);
-        drop(p, [db[0] * sp2, db[1] * sp2, db[2] * sp2], tpass + (0.12 + 0.5 * rnd()) * 1e-3, r);
-        if (rnd() < 0.05 * mamt) puff(p, [db[0] * sp2 * 0.5, db[1] * sp2 * 0.5, db[2] * sp2 * 0.5], tpass + 2e-4, 0.005, 0.06, 0.15);
+        // the surface water can only fly once the latex over it has gone
+        var tb = Math.max(tpass + (0.12 + 0.5 * rnd()) * 1e-3, pf(dir[0], dir[1], dir[2]) + 5e-5 * rnd());
+        drop(p, [db[0] * sp2, db[1] * sp2, db[2] * sp2], tb, r);
+        if (rnd() < 0.05 * mamt) puff(p, [db[0] * sp2 * 0.5, db[1] * sp2 * 0.5, db[2] * sp2 * 0.5], tb + 5e-5, 0.005, 0.06, 0.15);
       }
     }
 
