@@ -23,8 +23,16 @@ var WB_MEM = (function () {
   var H0 = 2.5e-4;           // unstretched latex thickness [m]
   var RHO_L = 950;           // latex density [kg/m^3]
   var LEVEL = 5;             // icosphere subdivisions: 10242 vertices, 20480 triangles
-  var DETACH = 0.001;        // [m] latex that has moved this far has left its spot on the water
+  var DETACH = 0.0012;       // [m] latex that has slid this far along the water has left its spot
+  var LIFT = 0.0006;         // [m] ... or has lifted this far off the water surface
   var PIN_Y = 0.975;         // directions above this are the tied neck (held by the knot)
+  /* Latex at balloon stretch behaves almost like a constant-tension film: above the plateau
+     stretch LP the tension barely grows, so a torn edge gathers the rubber into a rolled rim
+     that retracts at the Taylor-Culick speed v = sqrt(T / rho_A) while the skin ahead of the
+     rim stays put.  Below LP the rubber is a linear spring; in compression it buckles. */
+  var LP = 1.6, PLATEAU = 0.1, CGEO = 0.577;   // CGEO: edge force of an isotropic tension on a triangle lattice
+  var LMAX = 3.0;            // free rubber cannot be stretched beyond this (it would tear): no strings of stretched mesh
+  var LBREAK = 3.2;          // latex on the water overstretched beyond this (blast inflation, ~25 % swell) shreds
 
   function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
   function norm3(a) { var l = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
@@ -159,12 +167,14 @@ var WB_MEM = (function () {
      More energetic shots start more cracks that run further (the latex shreds). */
   P.makeCracks = function (rnd) {
     var S = this.S, U = this.U, vio = S.violence, self = this, list = [];
-    var nBase = Math.round(clamp(3 + 1.1 * vio, 3, 11));
+    // 3-6 radial cracks run out from each hole ahead of the retracting rim (a .22 LR: 3, short; rifle
+    // rounds: many, long, branching - the skin shreds)
+    var nBase = Math.round(clamp(2.5 + 0.9 * vio, 3, 11));
     var ds = 0.011;                                          // step along the unit sphere [rad]
     function grow(p, u, h, depth, t0) {
       var pts = [p[0], p[1], p[2]], ts = [t0], t = t0, om = 0;
-      var thMax = Math.min(3.0, (0.85 + 1.2 * rnd()) * (depth ? 0.55 : 1) * (1 + 0.16 * Math.log(1 + vio)));
-      var v0 = U.peelSpeed * (1.25 + 0.55 * rnd()) * (1 + 0.1 * Math.log(1 + vio));
+      var thMax = Math.min(2.4, (0.45 + 0.7 * rnd()) * (depth ? 0.55 : 1) * (1 + 0.3 * Math.log(1 + vio)));
+      var v0 = U.peelSpeed * (1.45 + 0.4 * rnd()) * (1 + 0.1 * Math.log(1 + vio));   // crack tips outrun the rim
       for (var st = 0; st < 600; st++) {
         var th = Math.acos(clamp(dot(p, h.a), -1, 1));
         if (th > thMax || p[1] > PIN_Y - 0.03) break;
@@ -179,7 +189,7 @@ var WB_MEM = (function () {
         var vc = v0 * (1 - 0.4 * Math.min(1, th / thMax));  // the crack slows as it runs out of stored energy
         t += ds * S.R * SH.shapeR(p[1]) / vc;
         pts.push(p[0], p[1], p[2]); ts.push(t);
-        if (depth < 2 && st > 3 && rnd() < 0.01 * (1 + 0.3 * vio)) {
+        if (depth < 2 && st > 3 && rnd() < 0.008 * (1 + 0.35 * vio)) {
           var bs = (rnd() < 0.5 ? -1 : 1) * (0.35 + 0.4 * rnd()), bw = cross(p, u);
           grow(p.slice(), norm3([u[0] * Math.cos(bs) + bw[0] * Math.sin(bs), u[1] * Math.cos(bs) + bw[1] * Math.sin(bs), u[2] * Math.cos(bs) + bw[2] * Math.sin(bs)]), h, depth + 1, t);
         }
@@ -287,16 +297,21 @@ var WB_MEM = (function () {
       if (!e) emap.set(key, e = { a: ca, b: cb, n: 0, die: 0, L: dist(F[3 * t + k], F[3 * t + (k + 1) % 3]) / LAMBDA, w: [] });
       e.n++; e.die = Math.max(e.die, dead[t]); e.w.push(cor[3 * t + (k + 2) % 3]);
     }
-    // latex: E ~ 1.5 MPa, h0 0.25 mm; stiffness scaled so the free edge retracts at the chosen speed
-    var KE = 1100 * Math.pow(this.U.peelSpeed / 45, 2);
+    // membrane tension from the retraction (Culick) speed: T = rho_A v^2, rho_A of the inflated skin
+    var rhoA = RHO_L * H0 / (LAMBDA * LAMBDA), Tm = rhoA * this.U.peelSpeed * this.U.peelSpeed;
+    var fAt0 = 1 + PLATEAU * (LAMBDA - LP) / (LP - 1), kSum = 0;
     var ne = emap.size, eA = new Int32Array(ne), eB = new Int32Array(ne), eL = new Float64Array(ne), eAl = new Float64Array(ne), eDie = new Float64Array(ne);
-    var bend = [];
+    var eF0 = new Float64Array(ne), bend = [];
     i = 0;
     emap.forEach(function (e) {
-      eA[i] = e.a; eB[i] = e.b; eL[i] = e.L; eAl[i] = 1 / (KE * e.n / 2); eDie[i] = e.die; i++;
+      eA[i] = e.a; eB[i] = e.b; eL[i] = e.L; eDie[i] = e.die;
+      eF0[i] = Tm * e.L * LAMBDA * CGEO / fAt0 * e.n / 2;         // plateau force (torn halves carry half)
+      var kl = eF0[i] / (e.L * (LP - 1)); eAl[i] = 1 / kl; kSum += kl;
+      i++;
       if (e.n === 2) bend.push(e.w[0], e.w[1], e.die);
     });
     this.ne = ne; this.eA = eA; this.eB = eB; this.eL = eL; this.eAl = eAl; this.eDie = eDie; this.eLam = new Float64Array(ne);
+    this.eF0 = eF0; var KE = kSum / ne;
     var nb = bend.length / 3, bA = new Int32Array(nb), bB = new Int32Array(nb), bL = new Float64Array(nb), bDie = new Float64Array(nb);
     var co = this.copyOf;
     for (i = 0; i < nb; i++) { bA[i] = bend[3 * i]; bB[i] = bend[3 * i + 1]; bDie[i] = bend[3 * i + 2]; bL[i] = dist(co[bA[i]], co[bB[i]]) / LAMBDA; }
@@ -325,14 +340,46 @@ var WB_MEM = (function () {
     }
     this.tDet = new Float64Array(nc).fill(1e9);
     this.tDetO = new Float64Array(this.nv0).fill(1e9);
-    this.rs = new Float64Array(nc);
+    this.rs = new Float64Array(nc); this.F = new Float64Array(nc * 3);
+    this.tSwitch = Math.max(0.015, 2.5 * S.tPeelEnd);   // tearing phase (explicit) -> relaxed scraps (implicit)
     this.t = -1e-3; this.peelEnd = 0; this.detChanged = true;
     this.kDrag = 0.5 * SH.RHO_AIR * 0.7 / (RHO_L * H0);     // quadratic air drag of a fluttering scrap [1/m]
     this.tContactEnd = S.tPeelEnd * 2.5 + 0.004;
-    // relax the pre-stretched shell on the water (mesh irregularities), then take it as the reference
-    for (i = 0; i < 160; i++) { this.substep(-1e-3, 2e-5, 4, true); for (var k = 0; k < 3 * nc; k++) this.v[k] *= 0.3; }
+    // explicit step: ~1/3 of the stability limit (the stiffest springs scale with the tension, i.e. v^2)
+    this.dtExp = clamp(1.2e-5 * 45 / this.U.peelSpeed, 4e-6, 2.5e-5);
+    // edge dashpot ~ critical damping of one edge in the linear range (and explicit-stable: c w dt < 0.5)
+    var mMean = 0, kMean = 0, cnt = 0;
+    for (i = 0; i < nc; i++) if (this.mass[i] > 0) { mMean += this.mass[i]; cnt++; }
+    mMean /= cnt;
+    for (i = 0; i < this.ne; i++) kMean += 1 / this.eAl[i];
+    kMean /= this.ne;
+    this.cDamp = Math.min(1.2 * Math.sqrt(kMean * mMean), 0.25 * mMean / this.dtExp);
+    // the shell starts exactly on the water, every edge at the pre-stretch; no relaxation pass (a
+    // near-constant-tension film would just flow and distort) - the balancing forces below hold it
     this.v.fill(0);
     this.x0 = new Float64Array(x);
+    // whatever sideways force is left is carried by the water (film friction) until the tear reaches
+    // that spot, so the intact skin stays exactly where it is and only the rim moves
+    // (balanced per welded group - the copies of a vertex on a future crack - so that when the crack
+    // passes, each side is left with its own one-sided pull)
+    this.springForces(-1e-3);
+    var F = this.F, bal = this.bal = new Float64Array(nc * 3), C = S.C, root = new Int32Array(nc), m = this.mass;
+    for (i = 0; i < nc; i++) root[i] = i;
+    var find = function (a) { while (root[a] !== a) { root[a] = root[root[a]]; a = root[a]; } return a; };
+    for (i = 0; i < this.wA.length; i++) { var ra = find(this.wA[i]), rb = find(this.wB[i]); if (ra !== rb) root[ra] = rb; }
+    var GF = new Float64Array(nc * 3), GM = new Float64Array(nc);
+    for (i = 0; i < nc; i++) {
+      if (this.pin[i] || w[i] === 0) continue;
+      var r = find(i); GF[3 * r] += F[3 * i]; GF[3 * r + 1] += F[3 * i + 1]; GF[3 * r + 2] += F[3 * i + 2]; GM[r] += m[i];
+    }
+    for (i = 0; i < nc; i++) {
+      if (this.pin[i] || w[i] === 0) continue;
+      var g = find(i), sh = m[i] / GM[g], o3 = 3 * i;
+      var nx = x[o3] - C[0], ny = x[o3 + 1] - C[1], nz = x[o3 + 2] - C[2], nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+      var gx = GF[3 * g] * sh, gy = GF[3 * g + 1] * sh, gz = GF[3 * g + 2] * sh, fn = gx * nx + gy * ny + gz * nz;
+      bal[o3] = -(gx - fn * nx); bal[o3 + 1] = -(gy - fn * ny); bal[o3 + 2] = -(gz - fn * nz);
+    }
   };
 
   /* Radius of the water surface under direction (dx,dy,dz) at time t: the balloon shape,
@@ -363,33 +410,49 @@ var WB_MEM = (function () {
   P.substep = function (t, dt, iters, settle) {
     var nc = this.nc, x = this.x, v = this.v, xp = this.xp, w = this.w, S = this.S, i, i3;
     var t1 = t + dt, g = this.U.gravity, kd = this.kDrag, tDet = this.tDet, die = this.copyDie, tmp = [0, 0, 0];
+    var explicit = t < this.tSwitch, F = this.F;
+    if (explicit) this.springForces(t1);
     for (i = 0; i < nc; i++) {
       i3 = 3 * i;
       if (w[i] > 0 && die[i] <= t1) w[i] = 0;         // fell into a bullet hole
       xp[i3] = x[i3]; xp[i3 + 1] = x[i3 + 1]; xp[i3 + 2] = x[i3 + 2];
       if (this.pin[i]) { this.pinPos(i, t1, tmp); x[i3] = tmp[0]; x[i3 + 1] = tmp[1]; x[i3 + 2] = tmp[2]; continue; }
       if (w[i] === 0) continue;
-      if (tDet[i] < t) {                              // free rubber: gravity and air drag
+      if (explicit) {
+        var wd = w[i] * dt, B = this.bal && tDet[i] > t ? this.bal : null;   // film friction holds intact skin
+        v[i3] += (F[i3] + (B ? B[i3] : 0)) * wd; v[i3 + 1] += (F[i3 + 1] + (B ? B[i3 + 1] : 0)) * wd; v[i3 + 2] += (F[i3 + 2] + (B ? B[i3 + 2] : 0)) * wd;
+      }
+      if (tDet[i] <= t) {                             // free rubber: gravity and air drag
         v[i3 + 1] -= g * dt;
         var sp = Math.sqrt(v[i3] * v[i3] + v[i3 + 1] * v[i3 + 1] + v[i3 + 2] * v[i3 + 2]), f = 1 / (1 + kd * sp * dt);
+        // rubber converging on the knot from all sides collides with itself and piles up there
+        // (inelastic; stands in for self-collision): strong damping close to the neck
+        var kx = x[i3] - S.knot[0], ky = x[i3 + 1] - (S.knot[1] - 0.006), kz = x[i3 + 2] - S.knot[2], kdist = Math.sqrt(kx * kx + ky * ky + kz * kz);
+        if (kdist < 0.035) f *= Math.exp(-dt * 3000 * (1 - kdist / 0.035));
         v[i3] *= f; v[i3 + 1] *= f; v[i3 + 2] *= f;
       }
       x[i3] += v[i3] * dt; x[i3 + 1] += v[i3 + 1] * dt; x[i3 + 2] += v[i3 + 2] * dt;
     }
     // water surface radius under every vertex (moves slowly: once per substep)
+    // (latex on the water rides the moving surface - tent, blast; torn rubber only must not cut into the water)
     var contact = settle || t1 < this.tContactEnd, rs = this.rs, C = S.C;
     if (contact) for (i = 0; i < nc; i++) {
       if (w[i] === 0) continue; i3 = 3 * i;
       var dx = x[i3] - C[0], dy = x[i3 + 1] - C[1], dz = x[i3 + 2] - C[2], l = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      rs[i] = l > 1e-6 && l < 1.6 * S.R ? this.surfR(dx / l, dy / l, dz / l, t1) : 0;
+      rs[i] = l > 1e-6 && l < 1.6 * S.R ? (tDet[i] <= t ? S.R * SH.shapeR(dy / l) : this.surfR(dx / l, dy / l, dz / l, t1)) : 0;
     }
-    this.eLam.fill(0); this.bLam.fill(0);
-    for (var it = 0; it < iters; it++) {
-      this.solveEdges(dt, t1);
-      this.solveBend(dt, t1);
-      this.solveWelds(t1);
-      if (contact) this.contact(rs);
+    if (explicit) {
+      for (var it = 0; it < 2; it++) { this.solveWelds(t1); if (contact) this.contact(rs); }
+    } else {
+      this.eLam.fill(0); this.bLam.fill(0);
+      for (it = 0; it < iters; it++) {
+        this.solveEdges(dt, t1);
+        this.solveBend(dt, t1);
+        this.solveWelds(t1);
+        if (contact) this.contact(rs);
+      }
     }
+    if (!settle) this.limitStrain(t, t1);
     var inv = 1 / dt;
     for (i = 0; i < nc; i++) {
       if (w[i] === 0) continue; i3 = 3 * i;
@@ -399,16 +462,52 @@ var WB_MEM = (function () {
       v[i3] = (x[i3] - xp[i3]) * inv; v[i3 + 1] = (x[i3 + 1] - xp[i3 + 1]) * inv; v[i3 + 2] = (x[i3 + 2] - xp[i3 + 2]) * inv;
     }
     if (settle) return;
-    // latex that has moved off its spot has uncovered the water there
-    var x0 = this.x0, D2 = DETACH * DETACH, co = this.copyOf, tDO = this.tDetO;
+    // latex that has slid along or lifted off the (moving) water surface has uncovered it there
+    var x0 = this.x0, co = this.copyOf, tDO = this.tDetO;
     for (i = 0; i < nc; i++) {
       if (tDet[i] < 1e8 || (w[i] === 0 && !(die[i] <= t1))) continue;
       i3 = 3 * i;
-      var ex = x[i3] - x0[i3], ey = x[i3 + 1] - x0[i3 + 1], ez = x[i3 + 2] - x0[i3 + 2];
-      if (die[i] <= t1 || ex * ex + ey * ey + ez * ez > D2) {
+      var gone = die[i] <= t1;
+      if (!gone) {
+        var qx = x[i3] - C[0], qy = x[i3 + 1] - C[1], qz = x[i3 + 2] - C[2], ql = Math.sqrt(qx * qx + qy * qy + qz * qz) || 1;
+        var ex = x[i3] - x0[i3], ey = x[i3 + 1] - x0[i3 + 1], ez = x[i3 + 2] - x0[i3 + 2], en = (ex * qx + ey * qy + ez * qz) / ql;
+        var tx = ex - qx / ql * en, ty = ey - qy / ql * en, tz = ez - qz / ql * en;
+        gone = (rs[i] > 0 ? ql - rs[i] > LIFT : true) || tx * tx + ty * ty + tz * tz > DETACH * DETACH;
+      }
+      if (gone) {
         tDet[i] = t1;
         if (t1 < tDO[co[i]]) { tDO[co[i]] = t1; this.detChanged = true; }
       }
+    }
+  };
+  /* Explicit forces of the tearing phase: plateau (near constant) tension above LP, linear
+     below, weak buckling resistance in compression, plus weak bending (wing) springs. */
+  P.springForces = function (t1) {
+    var F = this.F.fill(0), x = this.x, vv = this.v, n = this.ne, A = this.eA, B = this.eB, L0 = this.eL, f0 = this.eF0, die = this.eDie;
+    var inv = 1 / (LP - 1), e, a3, b3, dx, dy, dz, l, s, cd = this.cDamp;
+    for (e = 0; e < n; e++) {
+      if (die[e] <= t1) continue;
+      a3 = 3 * A[e]; b3 = 3 * B[e];
+      dx = x[a3] - x[b3]; dy = x[a3 + 1] - x[b3 + 1]; dz = x[a3 + 2] - x[b3 + 2];
+      l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (l < 1e-12) continue;
+      var lam = l / L0[e], f = lam >= LP ? f0[e] * Math.min(1 + PLATEAU * (lam - LP) * inv, 2) : lam >= 1 ? f0[e] * (lam - 1) * inv : f0[e] * 0.05 * (lam - 1) * inv;
+      // rubber gathered into the rim crumples inelastically (viscoelastic loss): dashpot below the plateau
+      if (lam < LP) f += cd * ((vv[a3] - vv[b3]) * dx + (vv[a3 + 1] - vv[b3 + 1]) * dy + (vv[a3 + 2] - vv[b3 + 2]) * dz) / l;
+      s = f / l;
+      F[a3] -= s * dx; F[a3 + 1] -= s * dy; F[a3 + 2] -= s * dz;
+      F[b3] += s * dx; F[b3 + 1] += s * dy; F[b3 + 2] += s * dz;
+    }
+    var nb = this.nbd, BA = this.bA, BB = this.bB, BL = this.bL, bd = this.bDie, kb = 1 / this.bAl;
+    for (e = 0; e < nb; e++) {
+      if (bd[e] <= t1) continue;
+      a3 = 3 * BA[e]; b3 = 3 * BB[e];
+      dx = x[a3] - x[b3]; dy = x[a3 + 1] - x[b3 + 1]; dz = x[a3 + 2] - x[b3 + 2];
+      l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (l < 1e-12) continue;
+      var c = l - BL[e]; s = kb * (c < 0 ? 0.25 * c : c) / l;
+      F[a3] -= s * dx; F[a3 + 1] -= s * dy; F[a3 + 2] -= s * dz;
+      F[b3] += s * dx; F[b3 + 1] += s * dy; F[b3 + 2] += s * dz;
     }
   };
 
@@ -448,6 +547,34 @@ var WB_MEM = (function () {
       x[b3] -= wb * s * dx; x[b3 + 1] -= wb * s * dy; x[b3 + 2] -= wb * s * dz;
     }
   };
+  // strain limit on torn-off rubber; latex still on the water that is stretched past its breaking
+  // point (a violent blast inflating it) shreds there instead
+  P.limitStrain = function (t, t1) {
+    var n = this.ne, A = this.eA, B = this.eB, L0 = this.eL, die = this.eDie, x = this.x, w = this.w, tDet = this.tDet;
+    var co = this.copyOf, tDO = this.tDetO;
+    for (var e = 0; e < n; e++) {
+      if (die[e] <= t1) continue;
+      var a = A[e], b = B[e], fa = tDet[a] <= t || this.pin[a] === 1, fb = tDet[b] <= t || this.pin[b] === 1;
+      var wa = w[a], wb = w[b], ws = wa + wb;
+      if (ws === 0) continue;
+      var a3 = 3 * a, b3 = 3 * b, dx = x[a3] - x[b3], dy = x[a3 + 1] - x[b3 + 1], dz = x[a3 + 2] - x[b3 + 2];
+      var l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (!fa && !fb) {
+        if (l > LBREAK * L0[e] && tDet[a] > 1e8 && tDet[b] > 1e8) {
+          tDet[a] = tDet[b] = t1; this.detChanged = true;
+          if (t1 < tDO[co[a]]) tDO[co[a]] = t1;
+          if (t1 < tDO[co[b]]) tDO[co[b]] = t1;
+        }
+        continue;
+      }
+      if (!(fa && fb)) continue;
+      var lm = LMAX * L0[e];
+      if (l <= lm) continue;
+      var c = (l - lm) / (l * ws);
+      x[a3] -= wa * c * dx; x[a3 + 1] -= wa * c * dy; x[a3 + 2] -= wa * c * dz;
+      x[b3] += wb * c * dx; x[b3 + 1] += wb * c * dy; x[b3 + 2] += wb * c * dz;
+    }
+  };
   P.solveWelds = function (t1) {                      // copies of one vertex are the same point until the crack passes
     var n = this.wA.length, A = this.wA, B = this.wB, T = this.wT, x = this.x, w = this.w;
     for (var e = 0; e < n; e++) {
@@ -472,7 +599,10 @@ var WB_MEM = (function () {
     if (t1 <= 0) { this.t = t1; return; }
     if (this.t < 0) this.t = 0;
     while (this.t < t1 - 1e-12) {
-      var early = this.t < 0.015, dt = early ? 1e-5 : this.t < 0.06 ? 5e-5 : 2.5e-4, iters = early ? 4 : this.t < 0.06 ? 3 : 2;
+      // explicit while tearing (until a few ms after the peel), then implicit with steps growing as the scraps slow down
+      if (this.peelEnd > 0 && this.tSwitch > this.peelEnd + 0.004) this.tSwitch = Math.max(this.peelEnd + 0.004, this.t);
+      var early = this.t < this.tSwitch;
+      var dt = early ? this.dtExp : this.t < 0.06 ? 1e-4 : this.t < 0.2 ? 2.5e-4 : 1e-3, iters = early ? 1 : 2;
       dt = Math.min(dt, t1 - this.t);
       this.substep(this.t, dt, iters, false);
       this.t += dt;
@@ -489,6 +619,7 @@ var WB_MEM = (function () {
       this.peelEnd = t;
       var tDO = this.tDetO;
       for (i = 0; i < this.nv0; i++) if (tDO[i] > 1e8) tDO[i] = t;
+      for (i = 0; i < nc; i++) if (this.tDet[i] > 1e8) this.tDet[i] = t;   // every last scrap is free now
       this.detChanged = true;
     }
   };
@@ -500,8 +631,13 @@ var WB_MEM = (function () {
       var q = (x[3 * i + c] - QMIN[c]) / QSPAN[c];
       pos[3 * i + c] = Math.round((q < 0 ? 0 : q > 1 ? 1 : q) * 65535) - 32768;
     }
+    // detach time of every copy (the renderer derives the per-vertex field from it)
     var det = null;
-    if (this.detChanged) { det = new Float32Array(this.tDetO); this.detChanged = false; }
+    if (this.detChanged) {
+      det = new Float32Array(nc);
+      for (i = 0; i < nc; i++) det[i] = this.pin[i] && this.peelEnd > 0 ? this.peelEnd : this.tDet[i];
+      this.detChanged = false;
+    }
     return { pos: pos, det: det, peelEnd: this.peelEnd };
   };
   /* Static description for the renderer. */

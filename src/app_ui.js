@@ -120,15 +120,30 @@
     tStart = -Math.min(0.0008, 0.3 / U.bulletSpeed);
     buildWall(); buildTicks();
     regenSpray();
-    renderer.setPeel(function (x, y, z) { return SH.peelT(x, y, z, S.peel); }, 192);
+    renderer.setPeel(function () { return 1e4; }, 256);     // latex intact until the membrane simulation reports otherwise
+    renderer.setBulletMesh(Core.bulletMesh(S));
+    peelVer = -1; peelCapT = -1; sprayPeelFor = null;
     if (!keepJob) worker.postMessage({ type: 'bake', id: bakeId, params: JSON.parse(JSON.stringify(U)), slice: worker.local ? 10 : 40 });
     renderer.setWet(new Float32Array([1e4]), 1);
     needAssemble = true; resetAccum = true; histReset = true;
     if (!cam.auto) return;
     cam.target = (VIEWS[cam.view] && VIEWS[cam.view].floor) ? [S.C[0], 0.08, S.C[2]] : S.C.slice();
   }
+  var peelVer = -1, peelCapT = -1, sprayPeelFor = null;
+  /* keep the ray-traced latex (peel cube map) and the rubber mesh in step with the membrane simulation */
+  function syncMembrane() {
+    if (!store || !store.mm) return;
+    if (renderer.pmOwner !== store) { renderer.setPeelMesh(store.mm); renderer.pmOwner = store; peelVer = -1; }
+    var bt = store.bakedTime();
+    if (store.detVer !== peelVer || (!store.peelEnd && bt - peelCapT > 3e-4)) {
+      if (store.detVer !== peelVer && simT > 0 && (!store.peelEnd || simT < store.peelEnd + 0.002)) resetAccum = true;
+      renderer.updatePeel(store.peelField()); peelVer = store.detVer; peelCapT = bt;
+    }
+    if (store.peelEnd && sprayPeelFor !== store) { sprayPeelFor = store; regenSpray(); }   // rim spray from the simulated tear
+  }
   function regenSpray() {
-    spray = WB_SPRAY.generate(S, U);
+    var pf = store && store.peelEnd ? function (x, y, z) { return store.peelAt(x, y, z); } : null;
+    spray = WB_SPRAY.generate(S, U, pf, store && store.peelEnd ? store.peelEnd : 0);
     renderer.setInstances('spray', spray.drops, spray.dropCount);
     renderer.setInstances('mist', spray.mist, spray.mistCount);
     resetAccum = true;
@@ -311,7 +326,7 @@
   function phase(t) {
     if (t < 0) return 'Bullet in flight · ' + U.bulletSpeed.toFixed(0) + ' m/s';
     if (t < S.tX) return 'Bullet inside the water · ' + SH.bulletV(S, t).toFixed(0) + ' m/s · cavity opening';
-    if (t < S.tPeelEnd) return 'Latex tearing & retracting at ' + U.peelSpeed.toFixed(0) + ' m/s · bullet exited at ' + S.vExit.toFixed(0) + ' m/s';
+    if (t < (store && store.peelEnd ? store.peelEnd : S.tPeelEnd)) return 'Latex tearing along cracks & peeling back · bullet exited at ' + S.vExit.toFixed(0) + ' m/s';
     if (asm && asm.vol && asm.vol.min[1] + 0.3 * asm.vol.cell > 0.02) return 'Unsupported water falling · still holding the balloon’s shape';
     return 'Impact · the water sheets out across the floor';
   }
@@ -349,11 +364,13 @@
       if (simT >= U.duration) { simT = U.duration; holdEnd += dt; if (holdEnd > 2.5) { seek(tStart); } }
       needAssemble = true;
     }
+    syncMembrane();
     if (needAssemble && store && store.count) {
       store.smooth = U.surfaceSmooth;
       asm = store.assemble(Math.max(simT, 0));
       if (asm.vol) renderer.splat(asm.vol);
       renderer.setInstances('fluid', asm.fluid, asm.fluidCount);
+      if (asm.mem) renderer.setMemMesh(asm.mem);
       needAssemble = false; resetAccum = true;
     }
     autoFrame(dt);
@@ -386,10 +403,14 @@
     var vp0 = viewProj(B, fovy, aspect, 0.01, 200);
     u.uCamPos = B.pos; u.uCamR = B.r; u.uCamU = B.u; u.uCamF = B.f;
     u.uTanHalf = Math.tan(fovy / 2); u.uAspect = aspect; u.uNear = 0.01; u.uFar = 200;
-    u.uRes = [renderer.W, renderer.H]; u.uFrame = seed; u.uL1 = 1; u.uAccum = 1; u.uRand = Math.random() * 100;
+    // stochastic soft shadows / scattering only once frozen (they converge); playback stays noise-free
+    u.uRes = [renderer.W, renderer.H]; u.uFrame = seed; u.uL1 = 1; u.uAccum = still ? 1 : 0; u.uRand = Math.random() * 100; u.uShowRubber = 1;
+    u.uLJ = still ? [0, 0] : [2 * halton(hi + 5, 2) - 1, 2 * halton(hi + 5, 3) - 1];
     u.uJit = jit; u.uViewProj = viewProj(BL, fovy, aspect, 0.01, 200);
     u.uVP0 = vp0; u.uPrevVP = mode === 1 && prevVP ? prevVP : vp0;
     u.uPrevTime = mode === 1 ? prevTime : tS;
+    var sdb = SH.bulletS(S, tS) - SH.bulletS(S, u.uPrevTime);                      // bullet motion for its motion vectors
+    u.uBulletShift = [S.dir[0] * sdb, S.dir[1] * sdb, S.dir[2] * sdb];
     prevVP = vp0; prevTime = tS;
     u.uWetHalf = U._wetHalf || 1.6;
     // ---- caustics: photons from both softboxes through the water onto the floor
@@ -397,6 +418,7 @@
     u.uCauOn = cauOn ? 1 : 0; u.uShadowFloor = cauOn ? 0.08 : 0.3;
     var cc = S.C;
     u.uCauSize = 2.5; u.uCauMin = [cc[0] - 1.25, cc[2] - 1.25]; u.uCauRes = 1024;
+    renderer.updateRipples(u);                          // ring pass first: the latex surface (and caustics) use it
     if (cauOn && asm && asm.vol) {
       var V = asm.vol, cv = [V.min[0] + V.size[0] / 2, V.min[1] + V.size[1] / 2, V.min[2] + V.size[2] / 2];
       var rv = 0.5 * Math.hypot(V.size[0], V.size[1], V.size[2]), grid = 200;
@@ -439,9 +461,11 @@
     renderer.setOutput(w, h); renderer.resize(Math.round(w * sc), Math.round(h * sc)); histReset = true;
     return waitBaked(Math.max(simT, 0), 120000).then(function (ok) {
       store.smooth = U.surfaceSmooth;
+      syncMembrane();
       asm = store.assemble(Math.max(simT, 0));
       if (asm.vol) renderer.splat(asm.vol);
       renderer.setInstances('fluid', asm.fluid, asm.fluidCount);
+      if (asm.mem) renderer.setMemMesh(asm.mem);
       needAssemble = false;
       for (var k = 0; k < 20; k++) autoFrame(0.1);
       resetAccum = true; draw(false);
@@ -462,14 +486,25 @@
     set: function (k, v) { setParam(k, v); }, get: function (k) { return U[k]; }, params: function () { return JSON.parse(JSON.stringify(U)); },
     info: function () { return { bakedMs: store ? store.bakedTime() * 1000 : -1, done: !!(store && store.done), N: store ? store.N : 0, fps: fps, samples: renderer.accumN, setup: { tExitMs: S.tX * 1e3, vExit: S.vExit, EdepJ: S.Edep, peelEndMs: S.tPeelEnd * 1e3, cavityMaxCm: S.cavMax.amax * 100 } }; },
     capture: capture,
-    bench: function (n, w, h) {          // average GPU time of a full frame at w x h
+    dbg: function () {                    // diagnostics: density volume of the current frame
+      if (!asm || !asm.vol) return null;
+      var v = asm.vol, P = store.P, N = store.N, mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9];
+      var bn = [1e9, 1e9, 1e9], bx = [-1e9, -1e9, -1e9], cls = store.cls;
+      for (var k = 0; k < N; k++) for (var c = 0; c < 3; c++) {
+        mn[c] = Math.min(mn[c], P[3 * k + c]); mx[c] = Math.max(mx[c], P[3 * k + c]);
+        if (cls[k] === 0) { bn[c] = Math.min(bn[c], P[3 * k + c]); bx[c] = Math.max(bx[c], P[3 * k + c]); }
+      }
+      return { volMin: v.min, volSize: v.size, cell: v.cell, dims: [v.nx, v.ny, v.nz], h: v.h, bulk: asm.bulk, drops: asm.iso, allMin: mn, allMax: mx, bulkMin: bn, bulkMax: bx, peelEnd: store.peelEnd, t: asm.t };
+    },
+    bench: function (n, w, h, scale, live) {   // average GPU time of a frame at w x h (scale = render scale, live = playback frames)
       n = n || 5; capturing = true;
       var cv = $('view'); cv.width = w || 1280; cv.height = h || 720; outW = cv.width; outH = cv.height;
-      renderer.setOutput(outW, outH); renderer.resize(outW, outH); histReset = true;
+      var sc = scale || 1;
+      renderer.setOutput(outW, outH); renderer.resize(Math.round(outW * sc), Math.round(outH * sc)); histReset = true;
       var gl = renderer.gl, px = new Uint8Array(4);
       draw(false); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       var t0 = performance.now();
-      for (var i = 0; i < n; i++) draw(true);
+      for (var i = 0; i < n; i++) { frameCount++; draw(!live); }
       gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       var ms = (performance.now() - t0) / n;
       capturing = false; onResize();

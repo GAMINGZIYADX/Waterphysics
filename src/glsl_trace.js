@@ -43,7 +43,7 @@ float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float 
 }
 vec3 waterNormal(vec3 p) {
   // thin film on the floor: surface tension flattens particle-scale bumps -> wider gradient stencil
-  float e = uCell * mix(0.9, 4.0, smoothstep(0.03, 0.006, p.y));
+  float e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, p.y));
   vec3 g = vec3(0.0);
   for (int k = 0; k < 4 * uL1; k++) {            // tetrahedral stencil
     vec3 o = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;
@@ -60,11 +60,15 @@ vec3 ripples(vec3 p, vec3 n) {
     float ts = uTime - peelT(normalize(q - uC));
     fresh = smoothstep(0.0, 0.0012, ts) * (1.0 - smoothstep(0.01, 0.04, ts));
   }
-  float amp = uDetail * (0.08 + 0.9 * fresh) * smoothstep(0.004, 0.03, p.y);
+  float amp = uDetail * (0.06 + 0.45 * fresh) * smoothstep(0.004, 0.03, p.y);
   vec4 a = noised(q * 140.0), b = noised(q * 330.0 + 17.0), c = noised(q * 760.0 + 5.0);
   vec3 g = a.yzw * 0.0308 + b.yzw * 0.0231 + c.yzw * 0.0137;
+  g *= amp;
+  // concentric capillary ripples spreading from both bullet holes over the bare water
+  vec3 dq = q - uC; float dl = length(dq);
+  if (uCapRing > 0.0 && dl < 1.35 * uR && dl > 0.5 * uR && p.y > 0.01) g += textureLod(uRip, dq / dl, 0.0).xyz;   // (precomputed ring pass)
   g -= n * dot(g, n);
-  return normalize(n - amp * g);
+  return normalize(n - g);
 }
 void rubberAt(vec3 p, out float cov, out float rim) {
   cov = 0.0; rim = 0.0;
@@ -116,8 +120,8 @@ void main() {
       tf = rd.y < -1e-5 ? -ro.y / rd.y : 1e9;
       m1 = min(inBox ? t1b : 0.0, tf);
     } else {
-      // ---- in air: nearest of opaque scene and water surface
-      h = traceOpaque(ro, rd, true);
+      // ---- in air: nearest of opaque scene and water surface (the softboxes stay out of shot, but reflect)
+      h = traceOpaque(ro, rd, seg > 0);
       m0 = max(t0b, 0.0); m1 = min(t1b, h.t);
     }
     float aer = 0.0;
@@ -196,8 +200,7 @@ void main() {
       if (under) p.y = 1e-3;
     } else if (h.m == 2) { alb = vec3(uBackdrop); rough = 0.9; F0 = vec3(0.02); }
     else if (h.m == 3) { alb = vec3(0.72, 0.70, 0.66); rough = 0.8; F0 = vec3(0.03); }
-    else if (h.m == 4) { alb = uRubberCol * 0.75; rough = 0.32; F0 = vec3(0.045); }
-    else bulletMat(p, F0, rough);
+    else { alb = uRubberCol * 0.75; rough = 0.32; F0 = vec3(0.045); }
     col += thr * (directLight(p, n, v, alb, under ? 0.3 : rough, under ? vec3(0.0) : F0) + alb * ambientTerm(n) * (h.m == 1 && !under ? waterAO(p, n) : 1.0));
     if (h.m == 1) col += thr * alb / PI * causticAt(p.xz);
     if (under) { inside = false; break; }
@@ -207,12 +210,6 @@ void main() {
       vec3 nb2; float r2; concrete(p.xz * 1.7 + 3.1, r2, nb2);
       vec3 nw = normalize(mix(nb2, vec3(0.0, 1.0, 0.0), 0.55) + (uAccum > 0.5 ? (vec3(hash2(gl_FragCoord.xy + uRand * 7.7), 0.0, hash2(gl_FragCoord.yx + uRand * 3.3)) - 0.5) * 0.12 : vec3(0.0)));
       thr *= wet * 0.7 * (0.02 + 0.98 * fr); rd = reflect(rd, nw); ro = p + nw * 1e-3; continue;
-    }
-    if (h.m == 5) {                                 // metal: glossy reflection, blurred by the jacket's roughness
-      vec3 jr = vec3(hash2(gl_FragCoord.xy + uRand * 5.1), hash2(gl_FragCoord.yx + uRand * 8.3), hash2(gl_FragCoord.xy * 1.3 + uRand * 2.2)) - 0.5;
-      vec3 nr = normalize(n + jr * rough * 0.9);
-      thr *= (F0 + (1.0 - F0) * fr) * 0.85; rd = reflect(rd, nr); if (dot(rd, n) < 0.0) rd = reflect(rd, n);
-      ro = p + n * 2e-4; continue;
     }
     if (h.m == 4) col += thr * (0.045 + 0.955 * fr) * 0.5 * envCheap(p + n * 2e-4, reflect(rd, n), false);
     break;

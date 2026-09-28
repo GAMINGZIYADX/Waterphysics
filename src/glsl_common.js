@@ -23,6 +23,7 @@ uniform float uTE, uTX, uRate, uKappa, uPeelEnd;
 uniform int   uHasExit;
 uniform vec3  uEU, uEV, uXU, uXV;      // bases around the entry / exit hole axes (crack azimuths)
 uniform float uTent, uLipH, uLipW;     // latex tent ahead of the bullet, rolled lip height / width
+uniform float uShock, uCapRing;        // impact shock ring on the skin [m], capillary ripple strength on bare water
 uniform vec3  uRubberCol;  uniform float uRubberOpacity;
 
 // lights: rectangular softboxes (centre, half-extent vectors, radiance)
@@ -58,14 +59,15 @@ float shapeR(float c) {
 }
 uniform samplerCube uPeel;   // time the latex leaves each direction (baked from the physics model)
 float peelT(vec3 d) { return textureLod(uPeel, d, 0.0).r; }
+uniform samplerCube uRip;    // ring pass: capillary ripple slopes (rgb) and blast inflation of the skin (a) [m]
 // distance to the latex surface (analytic): sag shape + tent at the exit + rolled lip at the tear front
 float memSD(vec3 p, out float dtp) {
   vec3 d = p - uC; float l = max(length(d), 1e-5); vec3 dir = d / l;
-  float r = uR * shapeR(dir.y);
+  float r = uR * shapeR(dir.y) + textureLod(uRip, dir, 0.0).a;
   if (uTent > 0.0) { float a = acos(clamp(dot(dir, uXDir), -1.0, 1.0)); r += uTent * exp(-a * a / 0.03); }
-  if (uTime > uTE && uTime < uTE + 0.004) {
+  if (uTime > uTE && uTime < uTE + 0.004) {         // impact shock ring running over the skin
     float ph = acos(clamp(dot(dir, uEDir), -1.0, 1.0)) * uR - 55.0 * (uTime - uTE);
-    r += 0.0009 * exp(-(uTime - uTE) / 0.0012) * exp(-abs(ph) / 0.018) * sin(ph * 520.0);
+    r += uShock * exp(-(uTime - uTE) / 0.0012) * exp(-abs(ph) / 0.018) * sin(ph * 520.0) * (0.45 + 1.1 * vnoise2(dir.yz * 7.0 + dir.x * 3.0));
   }
   dtp = peelT(dir) - uTime;
   if (dtp > 0.0 && uTime > uTE && dtp < uLipW) { float x = dtp / uLipW; r += uLipH * 4.0 * x * (1.0 - x); }
@@ -138,8 +140,12 @@ float fresnelDiel(float cosi, float eta) {  // eta = n_t / n_i
 #define ZB 2.2
 #define RC 0.7
 vec3 studioVoid(vec3 rd) {
-  // faint bounce light in the unlit studio
-  float up = rd.y * 0.5 + 0.5;
-  return vec3(0.010, 0.011, 0.012) * (0.4 + 0.8 * up) * (uAmbient * 2.0 + 0.3);
+  // faint bounce light in the unlit studio, a dim white ceiling card and a glow along the far walls
+  // (gives metal and water something to reflect and refract)
+  float up = rd.y * 0.5 + 0.5, amb = uAmbient * 4.0 + 0.4;
+  vec3 c = vec3(0.010, 0.011, 0.012) * (0.4 + 0.8 * up) * (uAmbient * 2.0 + 0.3);
+  c += vec3(0.05, 0.05, 0.052) * smoothstep(0.55, 0.8, rd.y) * amb;
+  c += vec3(0.02) * exp(-abs(rd.y - 0.05) * 18.0) * amb;
+  return c;
 }
 `;

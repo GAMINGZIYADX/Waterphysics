@@ -31,10 +31,11 @@ var WB_Renderer = (function () {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
     gl.viewport(0, 0, 1, 1);
-    [['trace', this.pTrace, gl.TRIANGLES, 3], ['caustic', this.pCaustic, gl.POINTS, 1], ['drop', this.pDrop, gl.TRIANGLE_STRIP, 4], ['mist', this.pMist, gl.TRIANGLE_STRIP, 4]].forEach(function (e) {
+    [['trace', this.pTrace, gl.TRIANGLES, 3], ['caustic', this.pCaustic, gl.POINTS, 1], ['drop', this.pDrop, gl.TRIANGLE_STRIP, 4],
+     ['mist', this.pMist, gl.TRIANGLE_STRIP, 4], ['rubber', this.pRubber, gl.TRIANGLES, 3], ['bullet', this.pBullet, gl.TRIANGLES, 3]].forEach(function (e) {
       var t0 = performance.now();
       gl.useProgram(e[1].prog); gl.bindVertexArray(this.emptyVAO);
-      this.setU(e[1], { uVol: 0, uWet: 1, uDepthTex: 2, uPeel: 3, uCau: 4, uL1: 1 });
+      this.setU(e[1], { uVol: 0, uWet: 1, uDepthTex: 2, uPeel: 3, uCau: 4, uRip: 5, uL1: 1 });
       gl.drawArrays(e[2], 0, e[3]);
       gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
       T['draw_' + e[0]] = Math.round(performance.now() - t0);
@@ -84,6 +85,11 @@ var WB_Renderer = (function () {
     this.pSplat = this.program(G.splatVS, G.splatFS, 'splat');
     this.pBlur = this.program(G.fsQuadVS, G.blurFS, 'blur');
     this.pTAA = this.program(G.fsQuadVS, G.taaFS, 'taa');
+    this.pPeel = this.program(G.peelVS, G.peelFS, 'peel');
+    this.pPeelBlur = this.program(G.fsQuadVS, G.peelBlurFS, 'peelblur');
+    this.pRubber = this.program(G.rubberVS, hdr + G.common + G.scene + G.rubberFS, 'rubber');
+    this.pBullet = this.program(G.bulletVS, hdr + G.common + G.scene + G.bulletFS, 'bullet');
+    this.pRing = this.program(G.fsQuadVS, G.ringFS, 'ring');
     this.pDown = this.program(G.fsQuadVS, G.downFS, 'down');
     this.pUp = this.program(G.fsQuadVS, G.upFS, 'up');
     this.pFinal = this.program(G.fsQuadVS, G.finalFS, 'final');
@@ -149,7 +155,8 @@ var WB_Renderer = (function () {
       gl.useProgram(this.pCaustic.prog);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, this.vol.tex);
       gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_CUBE_MAP, this.peelTex);
-      u.uVol = 0; u.uWet = 1; u.uDepthTex = 2; u.uPeel = 3; u.uCau = 4;
+      gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_CUBE_MAP, this.ripTex);
+      u.uVol = 0; u.uWet = 1; u.uDepthTex = 2; u.uPeel = 3; u.uCau = 4; u.uRip = 5;
       this.setU(this.pCaustic, u);
       gl.bindVertexArray(this.emptyVAO);
       lights.forEach(function (L) {
@@ -170,6 +177,7 @@ var WB_Renderer = (function () {
      function the simulation uses, so tear pattern and physics always agree). */
   P.setPeel = function (fn, n) {
     var gl = this.gl, t = this.peelTex || (this.peelTex = gl.createTexture());
+    this.peelRes = n;
     gl.bindTexture(gl.TEXTURE_CUBE_MAP, t);
     var data = new Float32Array(n * n);
     for (var f = 0; f < 6; f++) {
@@ -192,6 +200,112 @@ var WB_Renderer = (function () {
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  };
+  /* Simulated latex: the fixed original mesh (for the peel cube map) ... */
+  P.setPeelMesh = function (mm) {
+    var gl = this.gl, M = this.pm || (this.pm = { vao: gl.createVertexArray(), dirBuf: gl.createBuffer(), tBuf: gl.createBuffer(), ibo: gl.createBuffer() });
+    gl.bindVertexArray(M.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, M.dirBuf); gl.bufferData(gl.ARRAY_BUFFER, mm.dir0, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, M.tBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(mm.nv0).fill(1e4), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 4, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, M.ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mm.tris0, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    M.count = mm.tris0.length;
+    if (!this.peelFBO || this.peelRes !== 256) {    // the cube map becomes a render target (R16F, 256^2 per face)
+      var n = this.peelRes = 256, t = this.peelTex || (this.peelTex = gl.createTexture());
+      gl.bindTexture(gl.TEXTURE_CUBE_MAP, t);
+      for (var f = 0; f < 6; f++) gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, gl.R16F, n, n, 0, gl.RED, gl.HALF_FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this.peelFBO = this.peelFBO || gl.createFramebuffer();
+    }
+  };
+  /* ... re-rasterised whenever the simulation reports newly detached latex: each face is drawn
+     into a scratch texture, blurred (H then V) and written into the cube map. */
+  P.updatePeel = function (field) {
+    var gl = this.gl, M = this.pm; if (!M) return;
+    var n = this.peelRes;
+    if (!this.peelTmp || this.peelTmp.n !== n) {
+      var mk = function () { var t = makeTex(gl, n, n, gl.R16F, gl.RED, gl.HALF_FLOAT, gl.NEAREST); return { tex: t, fbo: fbo(gl, [t], null) }; };
+      this.peelTmp = { n: n, a: mk(), b: mk() };
+    }
+    var T = this.peelTmp, bu = this.pPeelBlur.u;
+    gl.bindBuffer(gl.ARRAY_BUFFER, M.tBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, field);
+    gl.viewport(0, 0, n, n);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+    gl.clearColor(1e4, 0, 0, 1);
+    for (var f = 0; f < 6; f++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, T.a.fbo); gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(this.pPeel.prog); gl.bindVertexArray(M.vao);
+      gl.uniform1i(this.pPeel.u.uFace.loc, f);
+      gl.drawElements(gl.TRIANGLES, M.count, gl.UNSIGNED_SHORT, 0);
+      gl.useProgram(this.pPeelBlur.prog); gl.bindVertexArray(this.emptyVAO); gl.uniform1i(bu.uSrc.loc, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, T.b.fbo); gl.bindTexture(gl.TEXTURE_2D, T.a.tex);
+      gl.uniform2i(bu.uDir.loc, 1, 0); gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.peelFBO);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, this.peelTex, 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      gl.bindTexture(gl.TEXTURE_2D, T.b.tex);
+      gl.uniform2i(bu.uDir.loc, 0, 1); gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.clearColor(0, 0, 0, 0);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  };
+  /* The rubber that has left the water, at the displayed time: interleaved pos/normal/thickness. */
+  P.setMemMesh = function (m) {
+    var gl = this.gl, R = this.rm || (this.rm = { vao: gl.createVertexArray(), vbo: gl.createBuffer(), ibo: gl.createBuffer(), count: 0 });
+    gl.bindVertexArray(R.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vbo); gl.bufferData(gl.ARRAY_BUFFER, m.vtx.subarray(0, m.nc * 7), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 24);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.idx.subarray(0, m.count), gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(null);
+    R.count = m.count;
+  };
+  /* capillary ripple rings -> cube map of surface slopes (cheap: 6 x 128^2 pixels per frame) */
+  P.updateRipples = function (u) {
+    var gl = this.gl, n = 128;
+    if (!this.ripTex) {
+      this.ripTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_CUBE_MAP, this.ripTex);
+      for (var f = 0; f < 6; f++) gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, gl.RGBA16F, n, n, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this.ripFBO = gl.createFramebuffer();
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.ripFBO);
+    gl.viewport(0, 0, n, n);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+    gl.useProgram(this.pRing.prog);
+    this.setU(this.pRing, u); this.setU(this.pRing, { uN: n });
+    gl.bindVertexArray(this.emptyVAO);
+    for (var f2 = 0; f2 < 6; f2++) {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_CUBE_MAP_POSITIVE_X + f2, this.ripTex, 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      gl.uniform1i(this.pRing.u.uFace.loc, f2);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  };
+  P.setBulletMesh = function (m) {
+    var gl = this.gl, B = this.bm || (this.bm = { vao: gl.createVertexArray(), vbo: gl.createBuffer(), ibo: gl.createBuffer(), count: 0 });
+    gl.bindVertexArray(B.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, B.vbo); gl.bufferData(gl.ARRAY_BUFFER, m.vtx, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, B.ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.idx, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    B.count = m.idx.length;
   };
   P.setWet = function (data, res) {
     var gl = this.gl;
@@ -295,7 +409,7 @@ var WB_Renderer = (function () {
     this.setU(this.pSplat, { uVolMin: v.min, uCell: v.cell, uGrid: [v.nx, v.ny], uH: v.h });
     gl.bindVertexArray(this.splatVAO);
     gl.clearColor(0, 0, 0, 0);
-    var kr = Math.ceil(2.0 * v.h / v.cell), zl = this.pSplat.u.uSliceZ.loc;
+    var kr = Math.ceil(2.6 * v.h / v.cell), zl = this.pSplat.u.uSliceZ.loc;   // (floor kernels reach 2.6 h)
     for (var k = 0; k < v.nz; k++) {
       gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, V.tex, 0, k);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -342,15 +456,32 @@ var WB_Renderer = (function () {
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.wetTex);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_CUBE_MAP, this.peelTex);
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this.cauTex);
-    u.uVol = 0; u.uWet = 1; u.uDepthTex = 2; u.uPeel = 3; u.uCau = 4;
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_CUBE_MAP, this.ripTex);
+    u.uVol = 0; u.uWet = 1; u.uDepthTex = 2; u.uPeel = 3; u.uCau = 4; u.uRip = 5;
     this.setU(this.pTrace, u);
     gl.bindVertexArray(this.emptyVAO);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // ---- droplets (opaque-ish, depth tested against the traced depth; they also write motion vectors)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fSprite);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
     gl.depthFunc(gl.LESS);
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    // ---- latex that has left the water (pulled slightly forward so it wins where it still touches it)
+    if (this.rm && this.rm.count && u.uShowRubber) {
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.NONE]);
+      gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -2);
+      gl.useProgram(this.pRubber.prog);
+      this.setU(this.pRubber, u);
+      gl.bindVertexArray(this.rm.vao);
+      gl.drawElements(gl.TRIANGLES, this.rm.count, gl.UNSIGNED_SHORT, 0);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+    }
+    // ---- droplets and the bullet (depth tested against the traced depth; they also write motion vectors)
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    if (this.bm && this.bm.count && u.uBulletOn) {
+      gl.useProgram(this.pBullet.prog);
+      this.setU(this.pBullet, u);
+      gl.bindVertexArray(this.bm.vao);
+      gl.drawElements(gl.TRIANGLES, this.bm.count, gl.UNSIGNED_SHORT, 0);
+    }
     gl.useProgram(this.pDrop.prog);
     this.setU(this.pDrop, u);
     ['spray', 'fluid'].forEach(function (k) {

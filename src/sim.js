@@ -56,6 +56,7 @@ var WB_SIM = (function () {
       this.memV[i] = this.mem.nearest(dx, dy, dz);
     }
     this.relT = this.mem.tDetO;                    // live: filled in as the membrane tears
+    this.aerNow = Math.min(0.85, Math.max(0, (S.violence - 2) / 3));
     var oc = this.mem.origCopy = new Int32Array(this.mem.nv0).fill(-1);
     for (i = 0; i < this.mem.nc; i++) if (oc[this.mem.copyOf[i]] < 0) oc[this.mem.copyOf[i]] = i;
     var ts = 1; while (ts < N * 2) ts <<= 1;
@@ -264,8 +265,13 @@ var WB_SIM = (function () {
       var jit = 0.85 + 0.3 * this.rng();
       // coherent outward blast: only when the cavity is comparable to the balloon
       if (blast > 0) {
+        // line-source outflow u = G/r, but water inside the cavity moves with the cavity wall, and
+        // near the holes the pressure escapes through the hole (splash cone / exit jet) instead of
+        // blowing the thin polar caps outward
         var gam = Math.sqrt(blast * Ep / (Math.PI * SH.RHO_W * lnR));
-        var ur = Math.min(gam / Math.max(r, r0), ucap);
+        var reff = Math.max(r, r0, Math.min(0.5 * cav.amax, 0.3 * S.R));
+        var axf = Math.sin(Math.PI * Math.min(1, Math.max(0, sc / S.L)));
+        var ur = Math.min(gam / reff, ucap) * (0.35 + 0.65 * Math.sqrt(axf));
         v[i3 + 1] += ur * nyy * jit / s; v[i3 + 2] += ur * nzz * jit / s;
       }
       // axial momentum the drag hands to the water around the path
@@ -473,6 +479,8 @@ var WB_SIM = (function () {
         var x2 = (this.frames[this.nextFrame] - this.tHit[i]) / Math.max(this.tCav[i], 1e-5);
         ag = x2 <= 0.55 ? 0 : x2 >= 1.05 ? 1 : (x2 - 0.55) / 0.5;
         ag = ag * ag * (3 - 2 * ag);
+        // rifle rounds: the pressure pulse cavitates the water around the path at once (milky)
+        if (x2 > 0) ag = Math.max(ag, this.aerNow * Math.min(1, x2 * 20));
       }
       aer[i] = Math.round(Math.min(1, this.aer[i] * ag) * 255);
     }
