@@ -1,0 +1,4 @@
+# keep the Linux launchers and build script runnable even when checked out on Windows
+*.sh  text eol=lf
+*.py  text eol=lf
+*.bat text eol=crlf
