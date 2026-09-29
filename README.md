@@ -29,7 +29,7 @@ Options: `run.py --port 9000 --no-browser`.
 
 No Python? The launchers fall back to opening `water_balloon.html` directly, which works in most browsers.
 
-> **First load takes a while.** The path-tracing shaders are large, and compiling them can take **20–50 seconds** on Windows (ANGLE/D3D). This happens once per page load, and the screen stays dark until it's done.
+> **First load takes a while.** The path-tracing shaders are large. On Windows (ANGLE/D3D), compiling them takes about **15–25 seconds** the first time. The compile runs in the background with a seconds counter on screen, and the physics simulates meanwhile. After that the browser caches the compiled shaders, and later loads take under a second.
 
 ### Requirements
 
@@ -136,6 +136,6 @@ An optional argument sets the output path: `sh build.sh out/page.html`.
 
 ## Known limitations
 
-- Shader compilation on first load is slow on Windows (see above).
+- The first-ever load is slow on Windows while the shaders compile (see above). Browsers without `KHR_parallel_shader_compile` freeze the page during that compile.
 - The simulation is baked before playback, so a new shot or a physics change takes a few seconds to compute.
 - Visual realism is good but not photographic. The fluid resolution caps how fine the ligaments and droplets can get.

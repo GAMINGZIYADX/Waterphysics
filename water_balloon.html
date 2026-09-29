@@ -2013,19 +2013,32 @@ layout(location = 2) out vec4 oVel;           // object motion (none here: the r
 
 /* One marcher for both directions: from air finds the first point inside the water
    (returns -1 if none before t1); from inside finds the exit (returns t1 if none) and
-   integrates the aeration (bubble cloud) along the way. */
-float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float aer) {
-  aer = 0.0;
+   integrates the aeration (bubble cloud) along the way.  March, bisection and the
+   normal's gradient stencil share one loop so field() is inlined once: D3D inlines
+   every call site, and each copy added ~8 s of compile time. */
+float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float aer, out vec3 grad) {
+  aer = 0.0; grad = vec3(0.0);
   float t = t0 + uCell * (inside ? 0.22 : 0.5 * hash2(gl_FragCoord.xy * 0.73 + uRand * 17.0));
-  float last = 0.0;
-  for (int i = 0; i < 900 * uL1; i++) {
-    vec3 p = ro + rd * t;
+  float last = 0.0, a = 0.0, b = -1.0, res = -1.0, e = 0.0;
+  int nb = 0, k = -1;                              // b >= 0: bisecting; k >= 0: gradient stencil at res
+  for (int i = 0; i < 911 * uL1; i++) {
+    vec3 o = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;   // tetrahedral stencil
+    float tq = b >= 0.0 ? 0.5 * (a + b) : t;
+    vec3 p = k >= 0 ? ro + rd * res + o * e : ro + rd * tq;
     float f = field(p);
-    if ((f > uIso) != inside) {
-      if (i == 0) return t;
-      float a = t - last, b = t;
-      for (int k = 0; k < 7 * uL1; k++) { float m = 0.5 * (a + b); if ((field(ro + rd * m) > uIso) != inside) b = m; else a = m; }
-      return b;
+    if (k >= 0) { grad += o * f; k++; if (k == 4) return res; continue; }
+    bool crossed = (f > uIso) != inside;
+    // thin film on the floor: surface tension flattens particle-scale bumps -> wider gradient stencil
+    if (b >= 0.0) {
+      if (crossed) b = tq; else a = tq;
+      nb++;
+      if (nb >= 7) { res = b; k = 0; e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, ro.y + rd.y * res)); }
+      continue;
+    }
+    if (crossed) {
+      if (i == 0) { res = t; k = 0; e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, ro.y + rd.y * res)); }
+      else { a = t - last; b = t; }
+      continue;
     }
     float st = uCell * 0.45;
     if (inside) {                                  // bubble cloud: clumpy, sparkly rather than an even haze
@@ -2037,17 +2050,7 @@ float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float 
     if (t + st > t1) return inside ? t1 : -1.0;
     t += st; last = st;
   }
-  return inside ? t : -1.0;
-}
-vec3 waterNormal(vec3 p) {
-  // thin film on the floor: surface tension flattens particle-scale bumps -> wider gradient stencil
-  float e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, p.y));
-  vec3 g = vec3(0.0);
-  for (int k = 0; k < 4 * uL1; k++) {            // tetrahedral stencil
-    vec3 o = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;
-    g += o * field(p + o * e);
-  }
-  return dot(g, g) > 1e-12 ? -normalize(g) : vec3(0.0, 1.0, 0.0);
+  return k >= 0 ? res : (b >= 0.0 ? b : (inside ? t : -1.0));
 }
 // capillary ripples / wrinkles left by the retracting rubber, advected with the bulk
 vec3 ripples(vec3 p, vec3 n) {
@@ -2122,8 +2125,8 @@ void main() {
       h = traceOpaque(ro, rd, seg > 0);
       m0 = max(t0b, 0.0); m1 = min(t1b, h.t);
     }
-    float aer = 0.0;
-    float ts = (inside || inBox) ? marchSurface(ro, rd, m0, m1, inside, aer) : -1.0;
+    float aer = 0.0; vec3 grad = vec3(0.0);
+    float ts = (inside || inBox) ? marchSurface(ro, rd, m0, m1, inside, aer, grad) : -1.0;
     if (inside) {
       float tt = min(ts, tf);
       thr *= exp(-sigA * tt);
@@ -2138,7 +2141,7 @@ void main() {
     }
     if (surf) {
       // ---- water (or latex-covered water) interface, entering or leaving
-      vec3 n = waterNormal(ps), v = -rd;
+      vec3 n = dot(grad, grad) > 1e-12 ? -normalize(grad) : vec3(0.0, 1.0, 0.0), v = -rd;
       float cov, rim; rubberAt(ps, cov, rim);
       if (cov > 0.0) {
         n = memNormal(ps);
@@ -3054,6 +3057,9 @@ var WB_Renderer = (function () {
     if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This GPU/browser lacks EXT_color_buffer_float.');
     gl.getExtension('EXT_float_blend');
     this.floatLinear = !!gl.getExtension('OES_texture_float_linear');
+    // compile off the GPU process's main thread: a 30 s blocking compile trips the browser's GPU watchdog
+    this.parallel = gl.getExtension('KHR_parallel_shader_compile');
+    this.pending = [];
     this.gl = gl; this.canvas = canvas;
     this.vol = { tex: null, nx: 0, ny: 0, nz: 0 };
     this.W = 0; this.H = 0; this.accumN = 0; this.ping = 0;
@@ -3093,30 +3099,51 @@ var WB_Renderer = (function () {
     if (target === gl.TEXTURE_3D) gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
   };
 
-  P.compile = function (type, src, label) {
+  P.compile = function (type, src) {
     var gl = this.gl, s = gl.createShader(type);
     if (/[?&]nocache/.test(location.search)) src = src.replace('\n', '\n// ' + Math.random() + '\n');
     gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-      var log = gl.getShaderInfoLog(s), lines = src.split('\n'), m = /0:(\d+)/.exec(log), ctx = '';
-      if (m) { var ln = +m[1]; for (var i = Math.max(1, ln - 3); i <= Math.min(lines.length, ln + 2); i++) ctx += i + ': ' + lines[i - 1] + '\n'; }
-      throw new Error('Shader compile error in ' + label + ':\n' + log + '\n' + ctx);
-    }
     return s;
   };
+  /* Starts compiling and linking; the program is usable once poll() has returned true.
+     Querying any status before then would block until the driver is done. */
   P.program = function (vs, fs, label) {
-    var gl = this.gl, p = gl.createProgram(), t0 = performance.now();
-    gl.attachShader(p, this.compile(gl.VERTEX_SHADER, vs, label + '.vs'));
-    gl.attachShader(p, this.compile(gl.FRAGMENT_SHADER, fs, label + '.fs'));
+    var gl = this.gl, p = gl.createProgram();
+    var sv = this.compile(gl.VERTEX_SHADER, vs), sf = this.compile(gl.FRAGMENT_SHADER, fs);
+    gl.attachShader(p, sv); gl.attachShader(p, sf);
     gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('Link error in ' + label + ': ' + gl.getProgramInfoLog(p));
-    (window.WB_COMPILE = window.WB_COMPILE || {})[label] = Math.round(performance.now() - t0);
-    var info = { prog: p, u: {} }, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    var info = { prog: p, u: {}, label: label, t0: performance.now(), sh: [[sv, vs, label + '.vs'], [sf, fs, label + '.fs']] };
+    this.pending.push(info);
+    return info;
+  };
+  P.finishProgram = function (info) {
+    var gl = this.gl, p = info.prog;
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      info.sh.forEach(function (e) {
+        if (gl.getShaderParameter(e[0], gl.COMPILE_STATUS)) return;
+        var log = gl.getShaderInfoLog(e[0]), lines = e[1].split('\n'), m = /0:(\d+)/.exec(log), ctx = '';
+        if (m) { var ln = +m[1]; for (var i = Math.max(1, ln - 3); i <= Math.min(lines.length, ln + 2); i++) ctx += i + ': ' + lines[i - 1] + '\n'; }
+        throw new Error('Shader compile error in ' + e[2] + ':\n' + log + '\n' + ctx);
+      });
+      throw new Error('Link error in ' + info.label + ': ' + gl.getProgramInfoLog(p));
+    }
+    (window.WB_COMPILE = window.WB_COMPILE || {})[info.label] = Math.round(performance.now() - info.t0);
+    var n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
     for (var i = 0; i < n; i++) {
       var a = gl.getActiveUniform(p, i), name = a.name.replace(/\[0\]$/, '');
       info.u[name] = { loc: gl.getUniformLocation(p, a.name), type: a.type };
     }
-    return info;
+    info.sh = null;
+  };
+  // true once every program is compiled and linked; without the parallel extension this blocks
+  P.poll = function () {
+    var gl = this.gl, ext = this.parallel;
+    this.pending = this.pending.filter(function (info) {
+      if (ext && !gl.getProgramParameter(info.prog, ext.COMPLETION_STATUS_KHR)) return true;
+      this.finishProgram(info);
+      return false;
+    }, this);
+    return this.pending.length === 0;
   };
   P.programs = function () {
     var hdr = '#version 300 es\n#define FRAGXY gl_FragCoord.xy\n';
@@ -4216,17 +4243,19 @@ var WB_Core = (function () {
     else if (m.type === 'error') showError('Simulation error:\n' + m.msg);
   }
   function startBake(keepJob) {
-    if (!keepJob) bakeId++;
-    store = null; asm = null;
-    S = SH.computeSetup(U);
+    // keepJob (boot): the worker already started on these settings and may have sent frames during the shader compile
+    if (!keepJob) { bakeId++; store = null; S = SH.computeSetup(U); }
+    asm = null;
     tStart = -Math.min(0.0008, 0.3 / U.bulletSpeed);
     buildWall(); buildTicks();
     regenSpray();
     renderer.setPeel(function () { return 1e4; }, 256);     // latex intact until the membrane simulation reports otherwise
     renderer.setBulletMesh(Core.bulletMesh(S));
     peelVer = -1; peelCapT = -1; sprayPeelFor = null;
-    if (!keepJob) worker.postMessage({ type: 'bake', id: bakeId, params: JSON.parse(JSON.stringify(U)), slice: worker.local ? 10 : 40 });
-    renderer.setWet(new Float32Array([1e4]), 1);
+    if (!keepJob) {
+      worker.postMessage({ type: 'bake', id: bakeId, params: JSON.parse(JSON.stringify(U)), slice: worker.local ? 10 : 40 });
+      renderer.setWet(new Float32Array([1e4]), 1);
+    }
     needAssemble = true; resetAccum = true; histReset = true;
     if (!cam.auto) return;
     cam.target = (VIEWS[cam.view] && VIEWS[cam.view].floor) ? [S.C[0], 0.08, S.C[2]] : S.C.slice();
@@ -4633,10 +4662,15 @@ var WB_Core = (function () {
     $('hud-t').textContent = 'Compiling ray-tracing shaders…';
     $('hud-ph').textContent = 'first visit only (the browser caches them) — the physics is already simulating';
   } catch (e) { showError(e); }
-  // let the notice paint before the (blocking, one-time) shader compile
-  setTimeout(function () {
+  var bootT0 = performance.now();
+  function waitShaders() {
     try {
-      renderer = new WB_Renderer($('view'));
+      if (!renderer) renderer = new WB_Renderer($('view'));
+      if (!renderer.poll()) {
+        $('hud-t').textContent = 'Compiling ray-tracing shaders… ' + Math.round((performance.now() - bootT0) / 1000) + ' s';
+        setTimeout(waitShaders, 100);
+        return;
+      }
       renderer.warmup();
       buildUI(); bindUI(); updateRateLabel();
       onResize();
@@ -4647,7 +4681,9 @@ var WB_Core = (function () {
       if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) { play(false); seek(0.003); }
       requestAnimationFrame(rafLoop);
     } catch (e) { showError(e); }
-  }, 60);
+  }
+  // let the notice paint first (without the parallel-compile extension the compile blocks)
+  setTimeout(waitShaders, 60);
 })();
 
 </script>

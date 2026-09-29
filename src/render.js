@@ -12,6 +12,9 @@ var WB_Renderer = (function () {
     if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This GPU/browser lacks EXT_color_buffer_float.');
     gl.getExtension('EXT_float_blend');
     this.floatLinear = !!gl.getExtension('OES_texture_float_linear');
+    // compile off the GPU process's main thread: a 30 s blocking compile trips the browser's GPU watchdog
+    this.parallel = gl.getExtension('KHR_parallel_shader_compile');
+    this.pending = [];
     this.gl = gl; this.canvas = canvas;
     this.vol = { tex: null, nx: 0, ny: 0, nz: 0 };
     this.W = 0; this.H = 0; this.accumN = 0; this.ping = 0;
@@ -51,30 +54,51 @@ var WB_Renderer = (function () {
     if (target === gl.TEXTURE_3D) gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
   };
 
-  P.compile = function (type, src, label) {
+  P.compile = function (type, src) {
     var gl = this.gl, s = gl.createShader(type);
     if (/[?&]nocache/.test(location.search)) src = src.replace('\n', '\n// ' + Math.random() + '\n');
     gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-      var log = gl.getShaderInfoLog(s), lines = src.split('\n'), m = /0:(\d+)/.exec(log), ctx = '';
-      if (m) { var ln = +m[1]; for (var i = Math.max(1, ln - 3); i <= Math.min(lines.length, ln + 2); i++) ctx += i + ': ' + lines[i - 1] + '\n'; }
-      throw new Error('Shader compile error in ' + label + ':\n' + log + '\n' + ctx);
-    }
     return s;
   };
+  /* Starts compiling and linking; the program is usable once poll() has returned true.
+     Querying any status before then would block until the driver is done. */
   P.program = function (vs, fs, label) {
-    var gl = this.gl, p = gl.createProgram(), t0 = performance.now();
-    gl.attachShader(p, this.compile(gl.VERTEX_SHADER, vs, label + '.vs'));
-    gl.attachShader(p, this.compile(gl.FRAGMENT_SHADER, fs, label + '.fs'));
+    var gl = this.gl, p = gl.createProgram();
+    var sv = this.compile(gl.VERTEX_SHADER, vs), sf = this.compile(gl.FRAGMENT_SHADER, fs);
+    gl.attachShader(p, sv); gl.attachShader(p, sf);
     gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('Link error in ' + label + ': ' + gl.getProgramInfoLog(p));
-    (window.WB_COMPILE = window.WB_COMPILE || {})[label] = Math.round(performance.now() - t0);
-    var info = { prog: p, u: {} }, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    var info = { prog: p, u: {}, label: label, t0: performance.now(), sh: [[sv, vs, label + '.vs'], [sf, fs, label + '.fs']] };
+    this.pending.push(info);
+    return info;
+  };
+  P.finishProgram = function (info) {
+    var gl = this.gl, p = info.prog;
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      info.sh.forEach(function (e) {
+        if (gl.getShaderParameter(e[0], gl.COMPILE_STATUS)) return;
+        var log = gl.getShaderInfoLog(e[0]), lines = e[1].split('\n'), m = /0:(\d+)/.exec(log), ctx = '';
+        if (m) { var ln = +m[1]; for (var i = Math.max(1, ln - 3); i <= Math.min(lines.length, ln + 2); i++) ctx += i + ': ' + lines[i - 1] + '\n'; }
+        throw new Error('Shader compile error in ' + e[2] + ':\n' + log + '\n' + ctx);
+      });
+      throw new Error('Link error in ' + info.label + ': ' + gl.getProgramInfoLog(p));
+    }
+    (window.WB_COMPILE = window.WB_COMPILE || {})[info.label] = Math.round(performance.now() - info.t0);
+    var n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
     for (var i = 0; i < n; i++) {
       var a = gl.getActiveUniform(p, i), name = a.name.replace(/\[0\]$/, '');
       info.u[name] = { loc: gl.getUniformLocation(p, a.name), type: a.type };
     }
-    return info;
+    info.sh = null;
+  };
+  // true once every program is compiled and linked; without the parallel extension this blocks
+  P.poll = function () {
+    var gl = this.gl, ext = this.parallel;
+    this.pending = this.pending.filter(function (info) {
+      if (ext && !gl.getProgramParameter(info.prog, ext.COMPLETION_STATUS_KHR)) return true;
+      this.finishProgram(info);
+      return false;
+    }, this);
+    return this.pending.length === 0;
   };
   P.programs = function () {
     var hdr = '#version 300 es\n#define FRAGXY gl_FragCoord.xy\n';

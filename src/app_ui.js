@@ -114,17 +114,19 @@
     else if (m.type === 'error') showError('Simulation error:\n' + m.msg);
   }
   function startBake(keepJob) {
-    if (!keepJob) bakeId++;
-    store = null; asm = null;
-    S = SH.computeSetup(U);
+    // keepJob (boot): the worker already started on these settings and may have sent frames during the shader compile
+    if (!keepJob) { bakeId++; store = null; S = SH.computeSetup(U); }
+    asm = null;
     tStart = -Math.min(0.0008, 0.3 / U.bulletSpeed);
     buildWall(); buildTicks();
     regenSpray();
     renderer.setPeel(function () { return 1e4; }, 256);     // latex intact until the membrane simulation reports otherwise
     renderer.setBulletMesh(Core.bulletMesh(S));
     peelVer = -1; peelCapT = -1; sprayPeelFor = null;
-    if (!keepJob) worker.postMessage({ type: 'bake', id: bakeId, params: JSON.parse(JSON.stringify(U)), slice: worker.local ? 10 : 40 });
-    renderer.setWet(new Float32Array([1e4]), 1);
+    if (!keepJob) {
+      worker.postMessage({ type: 'bake', id: bakeId, params: JSON.parse(JSON.stringify(U)), slice: worker.local ? 10 : 40 });
+      renderer.setWet(new Float32Array([1e4]), 1);
+    }
     needAssemble = true; resetAccum = true; histReset = true;
     if (!cam.auto) return;
     cam.target = (VIEWS[cam.view] && VIEWS[cam.view].floor) ? [S.C[0], 0.08, S.C[2]] : S.C.slice();
@@ -531,10 +533,15 @@
     $('hud-t').textContent = 'Compiling ray-tracing shaders…';
     $('hud-ph').textContent = 'first visit only (the browser caches them) — the physics is already simulating';
   } catch (e) { showError(e); }
-  // let the notice paint before the (blocking, one-time) shader compile
-  setTimeout(function () {
+  var bootT0 = performance.now();
+  function waitShaders() {
     try {
-      renderer = new WB_Renderer($('view'));
+      if (!renderer) renderer = new WB_Renderer($('view'));
+      if (!renderer.poll()) {
+        $('hud-t').textContent = 'Compiling ray-tracing shaders… ' + Math.round((performance.now() - bootT0) / 1000) + ' s';
+        setTimeout(waitShaders, 100);
+        return;
+      }
       renderer.warmup();
       buildUI(); bindUI(); updateRateLabel();
       onResize();
@@ -545,5 +552,7 @@
       if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) { play(false); seek(0.003); }
       requestAnimationFrame(rafLoop);
     } catch (e) { showError(e); }
-  }, 60);
+  }
+  // let the notice paint first (without the parallel-compile extension the compile blocks)
+  setTimeout(waitShaders, 60);
 })();

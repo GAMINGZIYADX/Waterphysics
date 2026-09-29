@@ -15,19 +15,32 @@ layout(location = 2) out vec4 oVel;           // object motion (none here: the r
 
 /* One marcher for both directions: from air finds the first point inside the water
    (returns -1 if none before t1); from inside finds the exit (returns t1 if none) and
-   integrates the aeration (bubble cloud) along the way. */
-float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float aer) {
-  aer = 0.0;
+   integrates the aeration (bubble cloud) along the way.  March, bisection and the
+   normal's gradient stencil share one loop so field() is inlined once: D3D inlines
+   every call site, and each copy added ~8 s of compile time. */
+float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float aer, out vec3 grad) {
+  aer = 0.0; grad = vec3(0.0);
   float t = t0 + uCell * (inside ? 0.22 : 0.5 * hash2(gl_FragCoord.xy * 0.73 + uRand * 17.0));
-  float last = 0.0;
-  for (int i = 0; i < 900 * uL1; i++) {
-    vec3 p = ro + rd * t;
+  float last = 0.0, a = 0.0, b = -1.0, res = -1.0, e = 0.0;
+  int nb = 0, k = -1;                              // b >= 0: bisecting; k >= 0: gradient stencil at res
+  for (int i = 0; i < 911 * uL1; i++) {
+    vec3 o = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;   // tetrahedral stencil
+    float tq = b >= 0.0 ? 0.5 * (a + b) : t;
+    vec3 p = k >= 0 ? ro + rd * res + o * e : ro + rd * tq;
     float f = field(p);
-    if ((f > uIso) != inside) {
-      if (i == 0) return t;
-      float a = t - last, b = t;
-      for (int k = 0; k < 7 * uL1; k++) { float m = 0.5 * (a + b); if ((field(ro + rd * m) > uIso) != inside) b = m; else a = m; }
-      return b;
+    if (k >= 0) { grad += o * f; k++; if (k == 4) return res; continue; }
+    bool crossed = (f > uIso) != inside;
+    // thin film on the floor: surface tension flattens particle-scale bumps -> wider gradient stencil
+    if (b >= 0.0) {
+      if (crossed) b = tq; else a = tq;
+      nb++;
+      if (nb >= 7) { res = b; k = 0; e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, ro.y + rd.y * res)); }
+      continue;
+    }
+    if (crossed) {
+      if (i == 0) { res = t; k = 0; e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, ro.y + rd.y * res)); }
+      else { a = t - last; b = t; }
+      continue;
     }
     float st = uCell * 0.45;
     if (inside) {                                  // bubble cloud: clumpy, sparkly rather than an even haze
@@ -39,17 +52,7 @@ float marchSurface(vec3 ro, vec3 rd, float t0, float t1, bool inside, out float 
     if (t + st > t1) return inside ? t1 : -1.0;
     t += st; last = st;
   }
-  return inside ? t : -1.0;
-}
-vec3 waterNormal(vec3 p) {
-  // thin film on the floor: surface tension flattens particle-scale bumps -> wider gradient stencil
-  float e = uCell * mix(1.1, 5.0, smoothstep(0.03, 0.006, p.y));
-  vec3 g = vec3(0.0);
-  for (int k = 0; k < 4 * uL1; k++) {            // tetrahedral stencil
-    vec3 o = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;
-    g += o * field(p + o * e);
-  }
-  return dot(g, g) > 1e-12 ? -normalize(g) : vec3(0.0, 1.0, 0.0);
+  return k >= 0 ? res : (b >= 0.0 ? b : (inside ? t : -1.0));
 }
 // capillary ripples / wrinkles left by the retracting rubber, advected with the bulk
 vec3 ripples(vec3 p, vec3 n) {
@@ -124,8 +127,8 @@ void main() {
       h = traceOpaque(ro, rd, seg > 0);
       m0 = max(t0b, 0.0); m1 = min(t1b, h.t);
     }
-    float aer = 0.0;
-    float ts = (inside || inBox) ? marchSurface(ro, rd, m0, m1, inside, aer) : -1.0;
+    float aer = 0.0; vec3 grad = vec3(0.0);
+    float ts = (inside || inBox) ? marchSurface(ro, rd, m0, m1, inside, aer, grad) : -1.0;
     if (inside) {
       float tt = min(ts, tf);
       thr *= exp(-sigA * tt);
@@ -140,7 +143,7 @@ void main() {
     }
     if (surf) {
       // ---- water (or latex-covered water) interface, entering or leaving
-      vec3 n = waterNormal(ps), v = -rd;
+      vec3 n = dot(grad, grad) > 1e-12 ? -normalize(grad) : vec3(0.0, 1.0, 0.0), v = -rd;
       float cov, rim; rubberAt(ps, cov, rim);
       if (cov > 0.0) {
         n = memNormal(ps);
