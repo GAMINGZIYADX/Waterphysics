@@ -75,8 +75,8 @@ The side panel groups every parameter:
 - **Balloon:** radius, height above the floor, latex retraction speed, colour, opacity, clarity.
 - **Physics:** gravity, cavity violence, surface tension, viscosity, particle count, surface smoothing.
 - **Spray & mist:** droplet amount, mist, cavitation bubbles.
-- **Lighting:** photon-traced caustics, key softbox, backlight strip, ambient, backdrop, exposure.
-- **Camera:** field of view, render resolution, frozen-frame samples, micro-detail, aperture, shutter, bloom, grain, vignette.
+- **Lighting:** photon-traced caustics, key softbox, backlight strip, ambient, backdrop, background light (0 for a black studio), exposure.
+- **Camera:** field of view, render resolution, frozen-frame samples, micro-detail, aperture, shutter, motion blur (0 = round droplets, much less smearing on moving water), bloom, grain, vignette.
 
 Changing a physics setting re-runs the simulation in the background. Lighting and camera settings apply immediately.
 

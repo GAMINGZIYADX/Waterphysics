@@ -393,7 +393,7 @@ var WB_MEM = (function () {
       var tp = SH.bulletTimeAt(S, clamp(px, 0, S.L));
       if (t > tp) {
         var ra = Math.max(Math.hypot(py, pz), 0.006), u = Math.min(38, S.blastV * this.U.energyTransfer * 0.9 * Math.min(2.2, 0.05 / ra));
-        r += u * (t - tp) * Math.max(0.3, (py * dy + pz * dz) / ra);
+        r += u * (t - tp) * Math.max(0.3, (py * dy + pz * dz) / ra) * (1 - SH.smooth(0.7, 0.97, dy));   // (same taper at the neck as the ring pass)
       }
     }
     return r;

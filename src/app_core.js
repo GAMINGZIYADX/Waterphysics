@@ -52,6 +52,7 @@ var WB_Core = (function () {
     ['Lighting', 'rimEl', 'Backlight elevation', 0, 85, 1, 42, '°', ''],
     ['Lighting', 'ambient', 'Ambient fill', 0, 0.4, 0.005, 0.05, '', ''],
     ['Lighting', 'backdrop', 'Backdrop albedo', 0, 0.8, 0.01, 0.07, '', ''],
+    ['Lighting', 'bgLight', 'Background light', 0, 10, 0.1, 6, '', ''],
     ['Lighting', 'exposure', 'Exposure', -3, 3, 0.05, 0, 'EV', ''],
     ['Camera', 'fov', 'Field of view', 12, 75, 0.5, 30, '°', ''],
     ['Camera', 'renderScale', 'Render resolution (temporally upsampled)', 0.3, 1, 0.05, 0.75, '×', ''],
@@ -60,6 +61,7 @@ var WB_Core = (function () {
     ['Physics', 'surfaceSmooth', 'Surface smoothing passes', 0, 3, 1, 2, '', 'view'],
     ['Camera', 'fstop', 'Aperture (f-stop, frozen frames)', 1.4, 22, 0.1, 4, '', ''],
     ['Camera', 'shutter', 'Shutter (µs, frozen frames)', 0, 200, 0.5, 1, 'µs', ''],
+    ['Camera', 'motionBlur', 'Motion blur (streaks, trails)', 0, 1, 0.05, 1, '×', ''],
     ['Camera', 'bloom', 'Bloom', 0, 3, 0.05, 1, '×', ''],
     ['Camera', 'grain', 'Film grain', 0, 3, 0.05, 1, '×', ''],
     ['Camera', 'vignette', 'Vignette', 0, 1, 0.01, 0.35, '', '']
@@ -255,7 +257,9 @@ var WB_Core = (function () {
     }
     var out = { t: t, bulk: nb, iso: ni, com: null, vol: null, fluidCount: 0, fluid: this.fluid };
     if (this.mem && t < (this.peelEnd > 0 ? this.peelEnd + 0.001 : 1e9)) {   // keep the whole latex membrane inside the volume
-      for (c = 0; c < 3; c++) { mn[c] = Math.min(mn[c], this.mem.min[c]); mx[c] = Math.max(mx[c], this.mem.max[c]); }
+      // including its blast inflation: a box face cutting the inflated skin shows as a flat white slab
+      var gb = Math.min(this.mem.rate * Math.max(t, 0), this.mem.cap);
+      for (c = 0; c < 3; c++) { mn[c] = Math.min(mn[c], this.mem.min[c] - gb); mx[c] = Math.max(mx[c], this.mem.max[c] + gb); }
     }
     if (nb > 0) {
       com = [com[0] / nb, com[1] / nb, com[2] / nb];
@@ -324,9 +328,12 @@ var WB_Core = (function () {
     return { c: c, u: [u[0] * w / 2, u[1] * w / 2, u[2] * w / 2], v: [v[0] * h / 2, v[1] * h / 2, v[2] * h / 2], e: L };
   }
 
-  Store.prototype.setMembrane = function (S) {
+  // speed [m/s] at which the blast inflates the still-attached skin (bound used by the shaders and the volume box)
+  function bulgeRate(U, S) { return S.blast > 0.02 ? Math.min(38, S.blastV * U.energyTransfer * 0.9 * 2.2) : 0; }
+  Store.prototype.setMembrane = function (S, rate) {
     var R = S.R * 1.06;
-    this.mem = { min: [S.C[0] - R, S.C[1] - R, S.C[2] - R], max: [S.C[0] + R, S.topY + 0.004, S.C[2] + R], until: S.tPeelEnd + 0.001 };
+    this.mem = { min: [S.C[0] - R, S.C[1] - R, S.C[2] - R], max: [S.C[0] + R, S.topY + 0.004, S.C[2] + R], until: S.tPeelEnd + 0.001,
+                 rate: rate || 0, cap: 0.5 * S.R };
   };
 
   /* Analytic liquid features (see GLSL analyticSD): exit plume core, entry splash cone,
@@ -403,7 +410,7 @@ var WB_Core = (function () {
     var rim = rectLight(C, U.rimAz, U.rimEl, 1.35, 0.3, 1.25, [0.95 * U.rimIntensity, 0.98 * U.rimIntensity, 1.0 * U.rimIntensity]);
     u.uL0c = key.c; u.uL0u = key.u; u.uL0v = key.v; u.uL0e = key.e;
     u.uL1c = rim.c; u.uL1u = rim.u; u.uL1v = rim.v; u.uL1e = rim.e;
-    u.uAmbient = U.ambient; u.uBackdrop = U.backdrop;
+    u.uAmbient = U.ambient; u.uBackdrop = U.backdrop; u.uBgLight = U.bgLight;
     // volume
     if (asm && asm.vol) {
       u.uHasVol = 1; u.uVolMin = asm.vol.min; u.uVolSize = asm.vol.size; u.uCell = asm.vol.cell;
@@ -423,7 +430,7 @@ var WB_Core = (function () {
     // blast inflation of the skin (same law as the membrane's contact surface); drawn by the ring pass
     u.uBlastV = S.blast > 0.02 ? S.blastV * U.energyTransfer * 0.9 : 0;
     u.uEntry = S.entry; u.uBK = S.k; u.uBV0 = S.v0; u.uBL = S.L;
-    u.uBulgeMax = u.uBlastV > 0 ? Math.min(38, u.uBlastV * 2.2) * Math.max(t, 0) + 0.001 : 0;
+    u.uBulgeMax = u.uBlastV > 0 ? bulgeRate(U, S) * Math.max(t, 0) + 0.001 : 0;
     u.uCapRing = 0.35 * Math.min(2.0, Math.max(0.6, Math.sqrt(S.violence))) * U.surfaceDetail;
     u.uRipple = 1; u.uDetail = U.surfaceDetail; u.uClarity = U.latexClarity; u.uBubble = 45 * U.bubbles; u.uMist = U.mistAmount > 0 ? 1 : 0;
     // bullet
@@ -500,5 +507,5 @@ var WB_Core = (function () {
   }
 
   return { PRESETS: PRESETS, COLORS: COLORS, SPEC: SPEC, defaults: defaults, makeWorker: makeWorker, Store: Store,
-           sceneUniforms: sceneUniforms, bulletMesh: bulletMesh };
+           sceneUniforms: sceneUniforms, bulletMesh: bulletMesh, bulgeRate: bulgeRate };
 })();

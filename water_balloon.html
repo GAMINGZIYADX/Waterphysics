@@ -751,7 +751,7 @@ var WB_MEM = (function () {
       var tp = SH.bulletTimeAt(S, clamp(px, 0, S.L));
       if (t > tp) {
         var ra = Math.max(Math.hypot(py, pz), 0.006), u = Math.min(38, S.blastV * this.U.energyTransfer * 0.9 * Math.min(2.2, 0.05 / ra));
-        r += u * (t - tp) * Math.max(0.3, (py * dy + pz * dz) / ra);
+        r += u * (t - tp) * Math.max(0.3, (py * dy + pz * dz) / ra) * (1 - SH.smooth(0.7, 0.97, dy));   // (same taper at the neck as the ring pass)
       }
     }
     return r;
@@ -1069,7 +1069,7 @@ var WB_SIM = (function () {
       this.memV[i] = this.mem.nearest(dx, dy, dz);
     }
     this.relT = this.mem.tDetO;                    // live: filled in as the membrane tears
-    this.aerNow = Math.min(0.85, Math.max(0, (S.violence - 2) / 3));
+    this.aerNow = Math.min(0.5, Math.max(0, (S.violence - 2) / 4));
     var oc = this.mem.origCopy = new Int32Array(this.mem.nv0).fill(-1);
     for (i = 0; i < this.mem.nc; i++) if (oc[this.mem.copyOf[i]] < 0) oc[this.mem.copyOf[i]] = i;
     var ts = 1; while (ts < N * 2) ts <<= 1;
@@ -1291,7 +1291,7 @@ var WB_SIM = (function () {
       var ux = (S.m * S.k * vb) / (SH.RHO_W * Math.PI * rax * rax) * Math.exp(-(r * r) / (rax * rax));
       v[i3] += Math.min(ux, 0.6 * ucap) * jit / s;
       this.tHit[i] = tp; this.tCav[i] = cav.Tc; this.rHit[i] = r; this.sHit[i] = sc; this.aMax[i] = cav.amax;
-      var ra = 0.3 * cav.amax + r0;
+      var ra = 0.12 * cav.amax + r0;           // cavitation hugs the path: a white trail inside clear water
       var ae = Math.exp(-(r * r) / (ra * ra));
       if (ae > this.aer[i]) this.aer[i] = ae;
     }
@@ -1564,7 +1564,8 @@ uniform vec3  uRubberCol;  uniform float uRubberOpacity;
 // lights: rectangular softboxes (centre, half-extent vectors, radiance)
 uniform vec3 uL0c, uL0u, uL0v, uL0e;
 uniform vec3 uL1c, uL1u, uL1v, uL1e;
-uniform float uAmbient, uBackdrop;
+uniform float uAmbient, uBackdrop, uBgLight;
+uniform vec3 uBgC;           // centre of the background light's pool on the cyclorama
 
 // ---------------------------------------------------------------- utils
 float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -1620,12 +1621,13 @@ float rectIrr(vec3 p, vec3 n, vec3 c, vec3 hu, vec3 hv) {
   if (dot(F, c - p) < 0.0) F = -F;
   return max(0.0, 0.5 * dot(F, n));
 }
-// softbox emission incl. dark frame and slight hot centre
+// softbox emission: hot centre falling off toward a soft-edged frame (a diffuser, not a cut-out,
+// so its reflections in the water read as highlights)
 vec3 rectEmit(vec3 q, vec3 c, vec3 hu, vec3 hv, vec3 Le) {
   vec3 d = q - c; float u = dot(d, hu) / dot(hu, hu), v = dot(d, hv) / dot(hv, hv);
-  float edge = max(abs(u), abs(v));
-  float frame = 1.0 - smoothstep(0.93, 0.95, edge);
-  float hot = 1.0 + 0.18 * (1.0 - u*u) * (1.0 - v*v);
+  float edge = length(pow(vec2(abs(u), abs(v)), vec2(4.0)));      // rounded-rectangle distance
+  float frame = 1.0 - smoothstep(0.35, 0.95, edge);
+  float hot = 0.55 + 0.9 * (1.0 - u*u) * (1.0 - v*v);
   return Le * frame * hot;
 }
 bool hitRect(vec3 ro, vec3 rd, vec3 c, vec3 hu, vec3 hv, out float t) {
@@ -1682,6 +1684,12 @@ vec3 studioVoid(vec3 rd) {
   c += vec3(0.05, 0.05, 0.052) * smoothstep(0.55, 0.8, rd.y) * amb;
   c += vec3(0.02) * exp(-abs(rd.y - 0.05) * 18.0) * amb;
   return c;
+}
+// background light: a soft pool on the cyclorama behind the balloon (as seen from the camera), so the
+// water has something bright to refract (clear water in front of a black wall reads as a chrome ball)
+float bgPool(vec3 p) {
+  vec3 d = (p - uBgC) * vec3(1.0, 1.3, 1.0);
+  return uBgLight * exp(-dot(d, d) / 0.7);
 }
 `;
 
@@ -1992,7 +2000,8 @@ vec3 envCheap(vec3 ro, vec3 rd, bool lights) {
   if (m == 0) return studioVoid(rd);
   vec3 p = ro + rd * t;
   vec3 alb = m == 1 ? vec3(0.235, 0.228, 0.215) * (0.78 + 0.44 * vnoise2(p.xz * 11.0)) * mix(1.0, 0.42, floorWet(p.xz)) : vec3(uBackdrop);
-  return alb / PI * (uL0e * rectIrr(p, n, uL0c, uL0u, uL0v) + uL1e * rectIrr(p, n, uL1c, uL1u, uL1v)) + alb * ambientTerm(n);
+  return alb / PI * (uL0e * rectIrr(p, n, uL0c, uL0u, uL0v) + uL1e * rectIrr(p, n, uL1c, uL1u, uL1v)) + alb * ambientTerm(n)
+       + (m == 2 ? alb * bgPool(p) : vec3(0.0));
 }
 `;
 
@@ -2130,7 +2139,7 @@ void main() {
     if (inside) {
       float tt = min(ts, tf);
       thr *= exp(-sigA * tt);
-      float tb = exp(-aer * uBubble);
+      float tb = max(exp(-aer * uBubble), 0.3);   // a bubble cloud veils the water, it never turns it into milk
       col += thr * (1.0 - tb) * bubbleLight(ro + rd * tt * 0.5);
       thr *= tb;
       if (tf <= ts + 1e-5) { h.t = tf; h.m = 1; under = true; }
@@ -2204,6 +2213,7 @@ void main() {
     else { alb = uRubberCol * 0.75; rough = 0.32; F0 = vec3(0.045); }
     col += thr * (directLight(p, n, v, alb, under ? 0.3 : rough, under ? vec3(0.0) : F0) + alb * ambientTerm(n) * (h.m == 1 && !under ? waterAO(p, n) : 1.0));
     if (h.m == 1) col += thr * alb / PI * causticAt(p.xz);
+    if (h.m == 2) col += thr * alb * bgPool(p);
     if (under) { inside = false; break; }
     float fr = pow(1.0 - max(dot(n, v), 0.0), 5.0);
     if (h.m == 1 && wet > 0.02) {
@@ -2289,7 +2299,7 @@ layout(location = 1) in vec4 aA;   // p0.xyz, t0
 layout(location = 2) in vec4 aB;   // v0.xyz, radius
 layout(location = 3) in vec4 aC;   // tau, tLand, seed, kind (0 spray: drag trajectory, 1 fluid: straight line around t0)
 uniform mat4 uViewProj, uVP0, uPrevVP; uniform vec3 uCamPos, uCamR, uCamU, uCamF;
-uniform float uTime, uPrevTime, uG, uTanHalf; uniform vec2 uRes; uniform vec2 uJit; uniform vec2 uLensShift;
+uniform float uTime, uPrevTime, uG, uTanHalf, uStretch; uniform vec2 uRes; uniform vec2 uJit; uniform vec2 uLensShift;
 out vec3 vW; out vec3 vCen; out float vRad; out float vCov; out vec3 vAx; out float vEl; flat out vec3 vVel;
 vec3 posAt(float t, out bool ok, out vec3 vel) {
   float dt = t - aA.w;
@@ -2313,7 +2323,8 @@ void main() {
   float rr = max(rpx, 0.75) / pxm;           // inflate sub-pixel drops, keep energy via coverage
   vCov = min(1.0, (rpx * rpx) / (0.75 * 0.75));
   float sp = length(vel);
-  vEl = aC.w > 0.5 ? clamp(1.0 + sp / 3.5, 1.0, 3.2) : clamp(1.0 + (sp - 6.0) / 30.0, 1.0, 1.6) ;
+  vEl = aC.w > 0.5 ? clamp(1.0 + sp / 3.5, 1.0, 3.2) : clamp(1.0 + (sp - 6.0) / 30.0, 1.0, 1.6);
+  vEl = 1.0 + (vEl - 1.0) * uStretch;           // motion-blur setting: streak length
   vAx = sp > 1e-4 ? vel / sp : vec3(0.0, 1.0, 0.0);
   float bound = rr * pow(vEl, 0.6667);
   vec3 w = p + (uCamR * aCorner.x + uCamU * aCorner.y) * (bound * 1.5 + 1.0 / pxm);
@@ -2758,6 +2769,7 @@ void main() {
     vec3 q = uC + d * uR * (1.0 + 0.035 * (1.0 - c * c) + 0.03 * cn * cn - 0.05 * cp * cp + 0.13 * c12) - uEntry;
     float tp = (exp(uBK * clamp(q.x, 0.0, uBL)) - 1.0) / (uBK * uBV0), ra = max(length(q.yz), 0.006);
     bulge = min(38.0, uBlastV * min(2.2, 0.05 / ra)) * max(uTime - tp, 0.0) * max(0.3, dot(vec3(0.0, q.yz) / ra, d));
+    bulge *= 1.0 - smoothstep(0.7, 0.97, d.y);        // the tied neck holds the skin around it
   }
   o = vec4(aE * (w.x / max(length(aE), 1e-5)) + aX * (w.y / max(length(aX), 1e-5)), bulge);
 }`;
@@ -3583,7 +3595,7 @@ var WB_Renderer = (function () {
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, src.tex);
     this.setU(this.pTAA, { uCur: 0, uDepth: 1, uVel: 2, uHist: 3, uRenderRes: [W, H], uOutRes: [OW, OH], uJit: u.uJit,
       uMode: mode, uPrevVP: u.uPrevVP, uCamPos: u.uCamPos, uCamR: u.uCamR, uCamU: u.uCamU, uCamF: u.uCamF,
-      uTanHalf: u.uTanHalf, uAspect: u.uAspect, uMaxW: 7.0 });
+      uTanHalf: u.uTanHalf, uAspect: u.uAspect, uMaxW: o.maxW || 7.0 });
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.ping = 1 - this.ping; this.histValid = true;
     // ---- bloom
@@ -3676,6 +3688,7 @@ var WB_Core = (function () {
     ['Lighting', 'rimEl', 'Backlight elevation', 0, 85, 1, 42, '°', ''],
     ['Lighting', 'ambient', 'Ambient fill', 0, 0.4, 0.005, 0.05, '', ''],
     ['Lighting', 'backdrop', 'Backdrop albedo', 0, 0.8, 0.01, 0.07, '', ''],
+    ['Lighting', 'bgLight', 'Background light', 0, 10, 0.1, 6, '', ''],
     ['Lighting', 'exposure', 'Exposure', -3, 3, 0.05, 0, 'EV', ''],
     ['Camera', 'fov', 'Field of view', 12, 75, 0.5, 30, '°', ''],
     ['Camera', 'renderScale', 'Render resolution (temporally upsampled)', 0.3, 1, 0.05, 0.75, '×', ''],
@@ -3684,6 +3697,7 @@ var WB_Core = (function () {
     ['Physics', 'surfaceSmooth', 'Surface smoothing passes', 0, 3, 1, 2, '', 'view'],
     ['Camera', 'fstop', 'Aperture (f-stop, frozen frames)', 1.4, 22, 0.1, 4, '', ''],
     ['Camera', 'shutter', 'Shutter (µs, frozen frames)', 0, 200, 0.5, 1, 'µs', ''],
+    ['Camera', 'motionBlur', 'Motion blur (streaks, trails)', 0, 1, 0.05, 1, '×', ''],
     ['Camera', 'bloom', 'Bloom', 0, 3, 0.05, 1, '×', ''],
     ['Camera', 'grain', 'Film grain', 0, 3, 0.05, 1, '×', ''],
     ['Camera', 'vignette', 'Vignette', 0, 1, 0.01, 0.35, '', '']
@@ -3879,7 +3893,9 @@ var WB_Core = (function () {
     }
     var out = { t: t, bulk: nb, iso: ni, com: null, vol: null, fluidCount: 0, fluid: this.fluid };
     if (this.mem && t < (this.peelEnd > 0 ? this.peelEnd + 0.001 : 1e9)) {   // keep the whole latex membrane inside the volume
-      for (c = 0; c < 3; c++) { mn[c] = Math.min(mn[c], this.mem.min[c]); mx[c] = Math.max(mx[c], this.mem.max[c]); }
+      // including its blast inflation: a box face cutting the inflated skin shows as a flat white slab
+      var gb = Math.min(this.mem.rate * Math.max(t, 0), this.mem.cap);
+      for (c = 0; c < 3; c++) { mn[c] = Math.min(mn[c], this.mem.min[c] - gb); mx[c] = Math.max(mx[c], this.mem.max[c] + gb); }
     }
     if (nb > 0) {
       com = [com[0] / nb, com[1] / nb, com[2] / nb];
@@ -3948,9 +3964,12 @@ var WB_Core = (function () {
     return { c: c, u: [u[0] * w / 2, u[1] * w / 2, u[2] * w / 2], v: [v[0] * h / 2, v[1] * h / 2, v[2] * h / 2], e: L };
   }
 
-  Store.prototype.setMembrane = function (S) {
+  // speed [m/s] at which the blast inflates the still-attached skin (bound used by the shaders and the volume box)
+  function bulgeRate(U, S) { return S.blast > 0.02 ? Math.min(38, S.blastV * U.energyTransfer * 0.9 * 2.2) : 0; }
+  Store.prototype.setMembrane = function (S, rate) {
     var R = S.R * 1.06;
-    this.mem = { min: [S.C[0] - R, S.C[1] - R, S.C[2] - R], max: [S.C[0] + R, S.topY + 0.004, S.C[2] + R], until: S.tPeelEnd + 0.001 };
+    this.mem = { min: [S.C[0] - R, S.C[1] - R, S.C[2] - R], max: [S.C[0] + R, S.topY + 0.004, S.C[2] + R], until: S.tPeelEnd + 0.001,
+                 rate: rate || 0, cap: 0.5 * S.R };
   };
 
   /* Analytic liquid features (see GLSL analyticSD): exit plume core, entry splash cone,
@@ -4027,7 +4046,7 @@ var WB_Core = (function () {
     var rim = rectLight(C, U.rimAz, U.rimEl, 1.35, 0.3, 1.25, [0.95 * U.rimIntensity, 0.98 * U.rimIntensity, 1.0 * U.rimIntensity]);
     u.uL0c = key.c; u.uL0u = key.u; u.uL0v = key.v; u.uL0e = key.e;
     u.uL1c = rim.c; u.uL1u = rim.u; u.uL1v = rim.v; u.uL1e = rim.e;
-    u.uAmbient = U.ambient; u.uBackdrop = U.backdrop;
+    u.uAmbient = U.ambient; u.uBackdrop = U.backdrop; u.uBgLight = U.bgLight;
     // volume
     if (asm && asm.vol) {
       u.uHasVol = 1; u.uVolMin = asm.vol.min; u.uVolSize = asm.vol.size; u.uCell = asm.vol.cell;
@@ -4047,7 +4066,7 @@ var WB_Core = (function () {
     // blast inflation of the skin (same law as the membrane's contact surface); drawn by the ring pass
     u.uBlastV = S.blast > 0.02 ? S.blastV * U.energyTransfer * 0.9 : 0;
     u.uEntry = S.entry; u.uBK = S.k; u.uBV0 = S.v0; u.uBL = S.L;
-    u.uBulgeMax = u.uBlastV > 0 ? Math.min(38, u.uBlastV * 2.2) * Math.max(t, 0) + 0.001 : 0;
+    u.uBulgeMax = u.uBlastV > 0 ? bulgeRate(U, S) * Math.max(t, 0) + 0.001 : 0;
     u.uCapRing = 0.35 * Math.min(2.0, Math.max(0.6, Math.sqrt(S.violence))) * U.surfaceDetail;
     u.uRipple = 1; u.uDetail = U.surfaceDetail; u.uClarity = U.latexClarity; u.uBubble = 45 * U.bubbles; u.uMist = U.mistAmount > 0 ? 1 : 0;
     // bullet
@@ -4124,7 +4143,7 @@ var WB_Core = (function () {
   }
 
   return { PRESETS: PRESETS, COLORS: COLORS, SPEC: SPEC, defaults: defaults, makeWorker: makeWorker, Store: Store,
-           sceneUniforms: sceneUniforms, bulletMesh: bulletMesh };
+           sceneUniforms: sceneUniforms, bulletMesh: bulletMesh, bulgeRate: bulgeRate };
 })();
 
 /* ==========================================================================
@@ -4236,7 +4255,7 @@ var WB_Core = (function () {
   // ---------------------------------------------------------------- simulation bake
   function onWorker(m) {
     if (m.id !== bakeId) return;
-    if (m.type === 'meta') { store = new Core.Store(m.id, m); store.setMembrane(S); needAssemble = true; }
+    if (m.type === 'meta') { store = new Core.Store(m.id, m); store.setMembrane(S, Core.bulgeRate(U, S)); needAssemble = true; }
     else if (m.type === 'frame' && store) { store.add(m); if (buffering || store.count === 1) needAssemble = true; }
     else if (m.type === 'wet') { if (!renderer) return; renderer.setWet(m.wet, m.res); U._wetHalf = m.half; resetAccum = true; }
     else if (m.type === 'done' && store) { store.done = true; }
@@ -4517,7 +4536,7 @@ var WB_Core = (function () {
   function draw(still) {
     var B = camBasis(), fovy = U.fov * Math.PI / 180, aspect = outW / outH;
     // frozen frames integrate a real camera: shutter interval (motion blur) and thin-lens aperture (depth of field)
-    var tS = still && U.shutter > 0 ? simT + (Math.random() - 0.5) * U.shutter * 1e-6 : simT;
+    var tS = still && U.shutter > 0 ? simT + (Math.random() - 0.5) * U.shutter * U.motionBlur * 1e-6 : simT;
     var u = Core.sceneUniforms(U, S, tS, asm, store);
     var tanH = Math.tan(fovy / 2), focus = Math.max(0.05, cam.dist);
     var lensR = still ? (0.012 / tanH) / (2 * U.fstop) : 0, lx = 0, ly = 0;
@@ -4544,6 +4563,14 @@ var WB_Core = (function () {
     u.uBulletShift = [S.dir[0] * sdb, S.dir[1] * sdb, S.dir[2] * sdb];
     prevVP = vp0; prevTime = tS;
     u.uWetHalf = U._wetHalf || 1.6;
+    u.uStretch = U.motionBlur;
+    // background light aimed at the back wall right behind the balloon, as a photographer would for this camera
+    var cp = B.pos, dz = S.C[2] - cp[2], ZB = 2.2;
+    u.uBgC = [S.C[0], 0.8 * S.C[1], -ZB];
+    if (dz < -1e-3) {
+      var kb = (-ZB - cp[2]) / dz;
+      u.uBgC = [cp[0] + (S.C[0] - cp[0]) * kb, Math.max(0.2, cp[1] + (S.C[1] - cp[1]) * kb), -ZB];
+    }
     // ---- caustics: photons from both softboxes through the water onto the floor
     var cauOn = U.caustics !== 'off';
     u.uCauOn = cauOn ? 1 : 0; u.uShadowFloor = cauOn ? 0.08 : 0.3;
@@ -4564,8 +4591,9 @@ var WB_Core = (function () {
       });
       renderer.caustics(u, Ls, grid);
     } else renderer.caustics({ uHasVol: 0 }, [], 0);
+    // motion blur setting also sets how much history the temporal resolve keeps (less = crisper motion, more aliasing)
     renderer.render(u, { mode: mode, exposure: Math.pow(2, U.exposure), bloom: U.bloom, grain: U.grain,
-      vignette: U.vignette, seed: seed });
+      vignette: U.vignette, seed: seed, maxW: 1.5 + 5.5 * U.motionBlur });
     resetAccum = false;
   }
   function waitBaked(t, timeoutMs) {

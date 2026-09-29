@@ -73,6 +73,7 @@ void main() {
     vec3 q = uC + d * uR * (1.0 + 0.035 * (1.0 - c * c) + 0.03 * cn * cn - 0.05 * cp * cp + 0.13 * c12) - uEntry;
     float tp = (exp(uBK * clamp(q.x, 0.0, uBL)) - 1.0) / (uBK * uBV0), ra = max(length(q.yz), 0.006);
     bulge = min(38.0, uBlastV * min(2.2, 0.05 / ra)) * max(uTime - tp, 0.0) * max(0.3, dot(vec3(0.0, q.yz) / ra, d));
+    bulge *= 1.0 - smoothstep(0.7, 0.97, d.y);        // the tied neck holds the skin around it
   }
   o = vec4(aE * (w.x / max(length(aE), 1e-5)) + aX * (w.y / max(length(aX), 1e-5)), bulge);
 }`;

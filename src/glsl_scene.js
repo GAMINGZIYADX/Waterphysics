@@ -305,6 +305,7 @@ vec3 envCheap(vec3 ro, vec3 rd, bool lights) {
   if (m == 0) return studioVoid(rd);
   vec3 p = ro + rd * t;
   vec3 alb = m == 1 ? vec3(0.235, 0.228, 0.215) * (0.78 + 0.44 * vnoise2(p.xz * 11.0)) * mix(1.0, 0.42, floorWet(p.xz)) : vec3(uBackdrop);
-  return alb / PI * (uL0e * rectIrr(p, n, uL0c, uL0u, uL0v) + uL1e * rectIrr(p, n, uL1c, uL1u, uL1v)) + alb * ambientTerm(n);
+  return alb / PI * (uL0e * rectIrr(p, n, uL0c, uL0u, uL0v) + uL1e * rectIrr(p, n, uL1c, uL1u, uL1v)) + alb * ambientTerm(n)
+       + (m == 2 ? alb * bgPool(p) : vec3(0.0));
 }
 `;

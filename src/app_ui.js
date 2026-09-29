@@ -107,7 +107,7 @@
   // ---------------------------------------------------------------- simulation bake
   function onWorker(m) {
     if (m.id !== bakeId) return;
-    if (m.type === 'meta') { store = new Core.Store(m.id, m); store.setMembrane(S); needAssemble = true; }
+    if (m.type === 'meta') { store = new Core.Store(m.id, m); store.setMembrane(S, Core.bulgeRate(U, S)); needAssemble = true; }
     else if (m.type === 'frame' && store) { store.add(m); if (buffering || store.count === 1) needAssemble = true; }
     else if (m.type === 'wet') { if (!renderer) return; renderer.setWet(m.wet, m.res); U._wetHalf = m.half; resetAccum = true; }
     else if (m.type === 'done' && store) { store.done = true; }
@@ -388,7 +388,7 @@
   function draw(still) {
     var B = camBasis(), fovy = U.fov * Math.PI / 180, aspect = outW / outH;
     // frozen frames integrate a real camera: shutter interval (motion blur) and thin-lens aperture (depth of field)
-    var tS = still && U.shutter > 0 ? simT + (Math.random() - 0.5) * U.shutter * 1e-6 : simT;
+    var tS = still && U.shutter > 0 ? simT + (Math.random() - 0.5) * U.shutter * U.motionBlur * 1e-6 : simT;
     var u = Core.sceneUniforms(U, S, tS, asm, store);
     var tanH = Math.tan(fovy / 2), focus = Math.max(0.05, cam.dist);
     var lensR = still ? (0.012 / tanH) / (2 * U.fstop) : 0, lx = 0, ly = 0;
@@ -415,6 +415,14 @@
     u.uBulletShift = [S.dir[0] * sdb, S.dir[1] * sdb, S.dir[2] * sdb];
     prevVP = vp0; prevTime = tS;
     u.uWetHalf = U._wetHalf || 1.6;
+    u.uStretch = U.motionBlur;
+    // background light aimed at the back wall right behind the balloon, as a photographer would for this camera
+    var cp = B.pos, dz = S.C[2] - cp[2], ZB = 2.2;
+    u.uBgC = [S.C[0], 0.8 * S.C[1], -ZB];
+    if (dz < -1e-3) {
+      var kb = (-ZB - cp[2]) / dz;
+      u.uBgC = [cp[0] + (S.C[0] - cp[0]) * kb, Math.max(0.2, cp[1] + (S.C[1] - cp[1]) * kb), -ZB];
+    }
     // ---- caustics: photons from both softboxes through the water onto the floor
     var cauOn = U.caustics !== 'off';
     u.uCauOn = cauOn ? 1 : 0; u.uShadowFloor = cauOn ? 0.08 : 0.3;
@@ -435,8 +443,9 @@
       });
       renderer.caustics(u, Ls, grid);
     } else renderer.caustics({ uHasVol: 0 }, [], 0);
+    // motion blur setting also sets how much history the temporal resolve keeps (less = crisper motion, more aliasing)
     renderer.render(u, { mode: mode, exposure: Math.pow(2, U.exposure), bloom: U.bloom, grain: U.grain,
-      vignette: U.vignette, seed: seed });
+      vignette: U.vignette, seed: seed, maxW: 1.5 + 5.5 * U.motionBlur });
     resetAccum = false;
   }
   function waitBaked(t, timeoutMs) {

@@ -132,7 +132,7 @@ void main() {
     if (inside) {
       float tt = min(ts, tf);
       thr *= exp(-sigA * tt);
-      float tb = exp(-aer * uBubble);
+      float tb = max(exp(-aer * uBubble), 0.3);   // a bubble cloud veils the water, it never turns it into milk
       col += thr * (1.0 - tb) * bubbleLight(ro + rd * tt * 0.5);
       thr *= tb;
       if (tf <= ts + 1e-5) { h.t = tf; h.m = 1; under = true; }
@@ -206,6 +206,7 @@ void main() {
     else { alb = uRubberCol * 0.75; rough = 0.32; F0 = vec3(0.045); }
     col += thr * (directLight(p, n, v, alb, under ? 0.3 : rough, under ? vec3(0.0) : F0) + alb * ambientTerm(n) * (h.m == 1 && !under ? waterAO(p, n) : 1.0));
     if (h.m == 1) col += thr * alb / PI * causticAt(p.xz);
+    if (h.m == 2) col += thr * alb * bgPool(p);
     if (under) { inside = false; break; }
     float fr = pow(1.0 - max(dot(n, v), 0.0), 5.0);
     if (h.m == 1 && wet > 0.02) {

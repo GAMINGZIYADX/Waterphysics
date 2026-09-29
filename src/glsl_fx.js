@@ -58,7 +58,7 @@ layout(location = 1) in vec4 aA;   // p0.xyz, t0
 layout(location = 2) in vec4 aB;   // v0.xyz, radius
 layout(location = 3) in vec4 aC;   // tau, tLand, seed, kind (0 spray: drag trajectory, 1 fluid: straight line around t0)
 uniform mat4 uViewProj, uVP0, uPrevVP; uniform vec3 uCamPos, uCamR, uCamU, uCamF;
-uniform float uTime, uPrevTime, uG, uTanHalf; uniform vec2 uRes; uniform vec2 uJit; uniform vec2 uLensShift;
+uniform float uTime, uPrevTime, uG, uTanHalf, uStretch; uniform vec2 uRes; uniform vec2 uJit; uniform vec2 uLensShift;
 out vec3 vW; out vec3 vCen; out float vRad; out float vCov; out vec3 vAx; out float vEl; flat out vec3 vVel;
 vec3 posAt(float t, out bool ok, out vec3 vel) {
   float dt = t - aA.w;
@@ -82,7 +82,8 @@ void main() {
   float rr = max(rpx, 0.75) / pxm;           // inflate sub-pixel drops, keep energy via coverage
   vCov = min(1.0, (rpx * rpx) / (0.75 * 0.75));
   float sp = length(vel);
-  vEl = aC.w > 0.5 ? clamp(1.0 + sp / 3.5, 1.0, 3.2) : clamp(1.0 + (sp - 6.0) / 30.0, 1.0, 1.6) ;
+  vEl = aC.w > 0.5 ? clamp(1.0 + sp / 3.5, 1.0, 3.2) : clamp(1.0 + (sp - 6.0) / 30.0, 1.0, 1.6);
+  vEl = 1.0 + (vEl - 1.0) * uStretch;           // motion-blur setting: streak length
   vAx = sp > 1e-4 ? vel / sp : vec3(0.0, 1.0, 0.0);
   float bound = rr * pow(vEl, 0.6667);
   vec3 w = p + (uCamR * aCorner.x + uCamU * aCorner.y) * (bound * 1.5 + 1.0 / pxm);

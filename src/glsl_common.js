@@ -29,7 +29,8 @@ uniform vec3  uRubberCol;  uniform float uRubberOpacity;
 // lights: rectangular softboxes (centre, half-extent vectors, radiance)
 uniform vec3 uL0c, uL0u, uL0v, uL0e;
 uniform vec3 uL1c, uL1u, uL1v, uL1e;
-uniform float uAmbient, uBackdrop;
+uniform float uAmbient, uBackdrop, uBgLight;
+uniform vec3 uBgC;           // centre of the background light's pool on the cyclorama
 
 // ---------------------------------------------------------------- utils
 float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -85,12 +86,13 @@ float rectIrr(vec3 p, vec3 n, vec3 c, vec3 hu, vec3 hv) {
   if (dot(F, c - p) < 0.0) F = -F;
   return max(0.0, 0.5 * dot(F, n));
 }
-// softbox emission incl. dark frame and slight hot centre
+// softbox emission: hot centre falling off toward a soft-edged frame (a diffuser, not a cut-out,
+// so its reflections in the water read as highlights)
 vec3 rectEmit(vec3 q, vec3 c, vec3 hu, vec3 hv, vec3 Le) {
   vec3 d = q - c; float u = dot(d, hu) / dot(hu, hu), v = dot(d, hv) / dot(hv, hv);
-  float edge = max(abs(u), abs(v));
-  float frame = 1.0 - smoothstep(0.93, 0.95, edge);
-  float hot = 1.0 + 0.18 * (1.0 - u*u) * (1.0 - v*v);
+  float edge = length(pow(vec2(abs(u), abs(v)), vec2(4.0)));      // rounded-rectangle distance
+  float frame = 1.0 - smoothstep(0.35, 0.95, edge);
+  float hot = 0.55 + 0.9 * (1.0 - u*u) * (1.0 - v*v);
   return Le * frame * hot;
 }
 bool hitRect(vec3 ro, vec3 rd, vec3 c, vec3 hu, vec3 hv, out float t) {
@@ -147,5 +149,11 @@ vec3 studioVoid(vec3 rd) {
   c += vec3(0.05, 0.05, 0.052) * smoothstep(0.55, 0.8, rd.y) * amb;
   c += vec3(0.02) * exp(-abs(rd.y - 0.05) * 18.0) * amb;
   return c;
+}
+// background light: a soft pool on the cyclorama behind the balloon (as seen from the camera), so the
+// water has something bright to refract (clear water in front of a black wall reads as a chrome ball)
+float bgPool(vec3 p) {
+  vec3 d = (p - uBgC) * vec3(1.0, 1.3, 1.0);
+  return uBgLight * exp(-dot(d, d) / 0.7);
 }
 `;

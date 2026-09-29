@@ -56,7 +56,7 @@ var WB_SIM = (function () {
       this.memV[i] = this.mem.nearest(dx, dy, dz);
     }
     this.relT = this.mem.tDetO;                    // live: filled in as the membrane tears
-    this.aerNow = Math.min(0.85, Math.max(0, (S.violence - 2) / 3));
+    this.aerNow = Math.min(0.5, Math.max(0, (S.violence - 2) / 4));
     var oc = this.mem.origCopy = new Int32Array(this.mem.nv0).fill(-1);
     for (i = 0; i < this.mem.nc; i++) if (oc[this.mem.copyOf[i]] < 0) oc[this.mem.copyOf[i]] = i;
     var ts = 1; while (ts < N * 2) ts <<= 1;
@@ -278,7 +278,7 @@ var WB_SIM = (function () {
       var ux = (S.m * S.k * vb) / (SH.RHO_W * Math.PI * rax * rax) * Math.exp(-(r * r) / (rax * rax));
       v[i3] += Math.min(ux, 0.6 * ucap) * jit / s;
       this.tHit[i] = tp; this.tCav[i] = cav.Tc; this.rHit[i] = r; this.sHit[i] = sc; this.aMax[i] = cav.amax;
-      var ra = 0.3 * cav.amax + r0;
+      var ra = 0.12 * cav.amax + r0;           // cavitation hugs the path: a white trail inside clear water
       var ae = Math.exp(-(r * r) / (ra * ra));
       if (ae > this.aer[i]) this.aer[i] = ae;
     }

@@ -538,7 +538,7 @@ var WB_Renderer = (function () {
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, src.tex);
     this.setU(this.pTAA, { uCur: 0, uDepth: 1, uVel: 2, uHist: 3, uRenderRes: [W, H], uOutRes: [OW, OH], uJit: u.uJit,
       uMode: mode, uPrevVP: u.uPrevVP, uCamPos: u.uCamPos, uCamR: u.uCamR, uCamU: u.uCamU, uCamF: u.uCamF,
-      uTanHalf: u.uTanHalf, uAspect: u.uAspect, uMaxW: 7.0 });
+      uTanHalf: u.uTanHalf, uAspect: u.uAspect, uMaxW: o.maxW || 7.0 });
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.ping = 1 - this.ping; this.histValid = true;
     // ---- bloom
